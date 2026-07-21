@@ -1,5 +1,7 @@
 # HALCYON RING
 
+**[▶ Play here](https://thomasbrueggemann.github.io/halcyon-ring/)**
+
 A first-person browser game built with three.js: you live aboard a 1.9 km-diameter
 **Stanford torus** cruising through space. The habitat's flywheel is failing — every
 few minutes the ring stops spinning, gravity dies, and everything (including you)
