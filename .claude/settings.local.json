@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sL -o lib/three.module.js https://unpkg.com/three@0.160.0/build/three.module.js)",
+      "Bash(curl -sL -o lib/BufferGeometryUtils.js https://unpkg.com/three@0.160.0/examples/jsm/utils/BufferGeometryUtils.js)"
+    ]
+  }
+}

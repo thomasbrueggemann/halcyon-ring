@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HALCYON RING — Stanford Torus Simulator</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    { "imports": { "three": "./lib/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- Title screen -->
+  <div id="title" class="screen">
+    <div class="panel">
+      <h1>HALCYON&nbsp;RING</h1>
+      <p class="sub">Stanford Torus · Station Year 37 · Pop. 9,412</p>
+      <p class="story">
+        You are the duty engineer aboard <em>Halcyon</em>, a 1.9&nbsp;km Stanford torus
+        outbound past the Moon. The flywheel that spins the ring — and gives you
+        gravity — has developed a torque fault. Every few minutes the wheel stalls
+        and everything inside goes weightless.
+        <br><br>
+        Five systems around the ring need repairs. Walk (or float) the full circle,
+        fix them all, and stabilize the spin before someone gets hurt.
+      </p>
+      <div class="controls">
+        <span><b>WASD</b> move</span><span><b>Mouse</b> look</span>
+        <span><b>Shift</b> run</span><span><b>Space</b> jump</span>
+        <span><b>E</b> interact</span>
+        <span><b>Zero-g:</b> WASD thrust · Space up · C down</span>
+      </div>
+      <button id="btn-start">BEGIN SHIFT</button>
+    </div>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="crosshair">+</div>
+    <div id="alert" class="hidden"></div>
+    <div id="topbar">
+      <div id="stability">RING STABILITY 0/5</div>
+      <div id="gmeter"><div id="gmeter-fill"></div></div>
+      <div id="gmeter-label">0.94 g</div>
+    </div>
+    <ul id="objectives"></ul>
+    <div id="prompt" class="hidden"></div>
+    <div id="subtitle"></div>
+    <canvas id="minimap" width="170" height="170"></canvas>
+  </div>
+
+  <!-- Keypad modal -->
+  <div id="keypad" class="screen hidden">
+    <div class="panel small">
+      <h2>OBSERVATORY UPLINK</h2>
+      <div id="keypad-display">····</div>
+      <div class="kp-grid">
+        <button class="kp" data-d="1">1</button><button class="kp" data-d="2">2</button><button class="kp" data-d="3">3</button>
+        <button class="kp" data-d="4">4</button><button class="kp" data-d="5">5</button><button class="kp" data-d="6">6</button>
+        <button class="kp" data-d="7">7</button><button class="kp" data-d="8">8</button><button class="kp" data-d="9">9</button>
+        <button id="kp-clear">CLR</button><button class="kp" data-d="0">0</button><button id="kp-enter">OK</button>
+      </div>
+      <button id="kp-cancel" class="ghost">walk away [Esc]</button>
+    </div>
+  </div>
+
+  <!-- Alignment minigame -->
+  <div id="align" class="hidden">
+    <div class="align-box">
+      <canvas id="align-canvas" width="340" height="42"></canvas>
+      <div id="align-status"></div>
+    </div>
+  </div>
+
+  <!-- Pause -->
+  <div id="pause" class="screen hidden">
+    <div class="panel small">
+      <h2>SHIFT PAUSED</h2>
+      <button id="btn-resume">RESUME</button>
+    </div>
+  </div>
+
+  <!-- Win -->
+  <div id="win" class="screen hidden">
+    <div class="panel">
+      <h1>RING&nbsp;STABILIZED</h1>
+      <p id="win-time" class="sub"></p>
+      <p class="story">The flywheel hums evenly again. Down the curve of the ring,
+        streetlights steady, trees settle, and 9,412 people keep living their
+        lives — never knowing how close the sky came to standing still.</p>
+      <button id="btn-continue">KEEP WALKING THE RING</button>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
