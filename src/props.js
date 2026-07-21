@@ -1,12 +1,9 @@
 // ── Loose physical props that float when gravity fails ──────────────────────
-import * as THREE from 'three';
-import { RT, CHORD_DROP, DEG, G_FULL } from './config.js';
-import { torusPosition, frameQuaternion, upAt, worldToTorus } from './torusMath.js';
 
-const _up = new THREE.Vector3();
-const _q = new THREE.Quaternion();
+const _propsUp = new THREE.Vector3();
+const _propsQ = new THREE.Quaternion();
 
-export function buildProps(scene, textures, rng) {
+function buildProps(scene, textures, rng) {
   const group = new THREE.Group();
   scene.add(group);
   const props = [];
@@ -59,8 +56,8 @@ export function buildProps(scene, textures, rng) {
     for (const p of props) {
       p.vel.set((rng() - 0.5) * 2.4, (rng() - 0.5) * 2.4, (rng() - 0.5) * 2.4);
       const t = worldToTorus(p.pos);
-      upAt(t.theta, _up);
-      p.vel.addScaledVector(_up, 0.8 + rng() * 1.6);
+      upAt(t.theta, _propsUp);
+      p.vel.addScaledVector(_propsUp, 0.8 + rng() * 1.6);
       p.rot.set((rng() - 0.5) * 1.6, (rng() - 0.5) * 1.6, (rng() - 0.5) * 1.6);
     }
   }
@@ -68,20 +65,20 @@ export function buildProps(scene, textures, rng) {
   function update(dt, gravityScale, zeroG) {
     for (const p of props) {
       const t = worldToTorus(p.pos);
-      upAt(t.theta, _up);
-      p.vel.addScaledVector(_up, -G_FULL * gravityScale * dt);
+      upAt(t.theta, _propsUp);
+      p.vel.addScaledVector(_propsUp, -G_FULL * gravityScale * dt);
       if (zeroG) p.vel.multiplyScalar(Math.max(0, 1 - 0.05 * dt));
       p.pos.addScaledVector(p.vel, dt);
 
       const t2 = worldToTorus(p.pos);
-      upAt(t2.theta, _up);
+      upAt(t2.theta, _propsUp);
       // floor
       if (t2.h < p.half) {
         const pen = p.half - t2.h;
-        p.pos.addScaledVector(_up, pen);
-        const vUp = p.vel.dot(_up);
+        p.pos.addScaledVector(_propsUp, pen);
+        const vUp = p.vel.dot(_propsUp);
         if (vUp < 0) {
-          p.vel.addScaledVector(_up, -vUp * 1.3);       // restitution 0.3
+          p.vel.addScaledVector(_propsUp, -vUp * 1.3);       // restitution 0.3
           p.vel.multiplyScalar(0.92);                    // ground friction
           if (Math.abs(vUp) < 0.4 && !zeroG) { p.vel.set(0, 0, 0); p.rot.set(0, 0, 0); }
         }
@@ -93,7 +90,7 @@ export function buildProps(scene, textures, rng) {
         const maxR = RT - 1.5;
         if (dist > maxR) {
           const nx = cx / dist, ny = cy / dist, pen = dist - maxR;
-          p.pos.addScaledVector(_up, nx * pen);
+          p.pos.addScaledVector(_propsUp, nx * pen);
           p.pos.y -= ny * pen;
           p.vel.multiplyScalar(0.5);
         }

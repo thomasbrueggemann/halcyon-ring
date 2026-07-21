@@ -12,15 +12,17 @@ game runs fully offline.
 
 ## Run it
 
-Any static file server works (ES modules don't load from `file://`):
+Just open `index.html` in a browser — no server, no build step, no npm/node
+required. `src/*.js` are loaded directly as classic scripts (not ES modules,
+which browsers refuse to `import` from `file://`), in dependency order, and
+attach their classes/functions to the shared global scope.
 
-```bash
-cd stanford-torus
-python3 -m http.server 8347
-# then open http://localhost:8347
-```
+## Developing
 
-or `npx serve .`
+Edit any file in `src/`, then reopen (or refresh) `index.html` — that's it.
+If you add a new file, add a matching `<script src="src/....js">` tag in
+`index.html`, positioned after anything it depends on and before anything
+that depends on it.
 
 ## Controls
 

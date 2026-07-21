@@ -1,11 +1,4 @@
 // ── The torus shell: floor band, curved hull, glass ceiling, ribs, spokes ───
-import * as THREE from 'three';
-import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
-import {
-  RT, RF, RMAJ, HALF_W, CHORD_DROP, SPOKE_THETAS, DEG,
-} from './config.js';
-import { torusPosition, placementMatrix, frameQuaternion } from './torusMath.js';
-import { mulberry32 } from './textures.js';
 
 const RING_SEGS = 768;
 
@@ -76,7 +69,7 @@ function tubeArc(a, b, steps) {
   return pts;
 }
 
-export function buildWorld(scene, textures) {
+function buildWorld(scene, textures) {
   const world = new THREE.Group();
   scene.add(world);
 
@@ -285,4 +278,3 @@ export function buildWorld(scene, textures) {
   return { group: world, sweepProfile, tubeArc };
 }
 
-export { sweepProfile, tubeArc };

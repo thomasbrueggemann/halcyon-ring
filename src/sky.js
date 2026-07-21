@@ -2,10 +2,8 @@
 // Everything lives in one group that rotates about Y with the ring's spin,
 // so through the ceiling windows the sky visibly wheels past — and freezes
 // when the gravity drive fails.
-import * as THREE from 'three';
-import { mulberry32 } from './textures.js';
 
-export function buildSky(scene) {
+function buildSky(scene) {
   const group = new THREE.Group();
   scene.add(group);
 

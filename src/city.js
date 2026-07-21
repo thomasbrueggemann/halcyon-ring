@@ -1,11 +1,6 @@
 // ── The ring city: buildings, districts, puzzle stations, street furniture ──
-import * as THREE from 'three';
-import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
-import { RF, DEG, DISTRICTS, SPOKE_THETAS } from './config.js';
-import { placementMatrix, torusPosition, arcDelta } from './torusMath.js';
-import { sweepProfile } from './world.js';
 
-const _m = new THREE.Matrix4();
+const _cityM = new THREE.Matrix4();
 
 // Iterate theta positions (radians) along an arc given in degrees.
 function* arcSteps(fromDeg, toDeg, stepMeters) {
@@ -49,8 +44,8 @@ function gableRoofGeometry(latDepth, arcWidth, roofH, wallH, chimney = false) {
 function instancedFrom(geo, mat, placements, { shadow = true } = {}) {
   const mesh = new THREE.InstancedMesh(geo, mat, placements.length);
   placements.forEach((pl, i) => {
-    placementMatrix(pl.theta, pl.lat, pl.h ?? 0, pl.yaw ?? 0, pl.scale ?? 1, _m);
-    mesh.setMatrixAt(i, _m);
+    placementMatrix(pl.theta, pl.lat, pl.h ?? 0, pl.yaw ?? 0, pl.scale ?? 1, _cityM);
+    mesh.setMatrixAt(i, _cityM);
     if (pl.tint) mesh.setColorAt(i, pl.tint);
   });
   if (placements.some(p => p.tint)) mesh.instanceColor.needsUpdate = true;
@@ -59,7 +54,7 @@ function instancedFrom(geo, mat, placements, { shadow = true } = {}) {
   return mesh;
 }
 
-export function buildCity(scene, textures, colliders, rng) {
+function buildCity(scene, textures, colliders, rng) {
   const city = new THREE.Group();
   scene.add(city);
   const stations = {};

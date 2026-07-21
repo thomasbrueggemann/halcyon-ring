@@ -1,7 +1,6 @@
 // ── Procedural canvas textures ──────────────────────────────────────────────
-import * as THREE from 'three';
 
-export function mulberry32(seed) {
+function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -35,7 +34,7 @@ function noiseFill(ctx, w, h, rng, base, jitter, count) {
   }
 }
 
-export function makeTextures() {
+function makeTextures() {
   const rng = mulberry32(1234);
   const T = {};
 

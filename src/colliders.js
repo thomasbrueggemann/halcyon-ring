@@ -1,12 +1,11 @@
 // ── Static collision registry in torus-floor coordinates ────────────────────
 // Obstacles live in the (s, lat) plane where s = theta * RF is arc length.
 // Boxes are axis-aligned in that plane; cylinders are radial.
-import { RF, CIRCUMFERENCE } from './config.js';
 
 const BUCKETS = 256;
 const bucketArc = CIRCUMFERENCE / BUCKETS;
 
-export class Colliders {
+class Colliders {
   constructor() {
     this.buckets = Array.from({ length: BUCKETS }, () => []);
   }

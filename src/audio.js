@@ -1,5 +1,5 @@
 // ── Fully synthesized audio: ambience, klaxon, UI, footsteps ────────────────
-export class AudioEngine {
+class AudioEngine {
   constructor() {
     this.ctx = null;
     this.klaxonNodes = null;

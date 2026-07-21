@@ -1,11 +1,7 @@
 // ── Spin & gravity-failure scheduler ────────────────────────────────────────
 // gravityScale = (spin / FULL_SPIN)² — tied to the visible star rotation.
-import {
-  FULL_SPIN, FIRST_FAILURE_AT, FAILURE_DURATION,
-  FAILURE_INTERVAL_MIN, FAILURE_INTERVAL_MAX, SPIN_DOWN_TIME, SPIN_UP_TIME,
-} from './config.js';
 
-export class GravitySystem {
+class GravitySystem {
   constructor(rng) {
     this.rng = rng;
     this.spin = FULL_SPIN;

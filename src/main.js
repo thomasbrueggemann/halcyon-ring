@@ -1,20 +1,4 @@
 // ── HALCYON RING — main loop ────────────────────────────────────────────────
-import * as THREE from 'three';
-import { WORLD_SEED } from './config.js';
-import { mulberry32, makeTextures } from './textures.js';
-import { buildSky } from './sky.js';
-import { buildWorld } from './world.js';
-import { buildCity } from './city.js';
-import { buildTransit } from './transit.js';
-import { buildVegetation } from './vegetation.js';
-import { buildProps } from './props.js';
-import { Colliders } from './colliders.js';
-import { Player } from './player.js';
-import { GravitySystem } from './gravity.js';
-import { PuzzleManager } from './puzzles.js';
-import { UI } from './ui.js';
-import { AudioEngine } from './audio.js';
-import { upAt, tangentAt } from './torusMath.js';
 
 // ── renderer / scene ──
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -167,8 +151,8 @@ window.__game = { player, gravity, puzzles, stations, scene, camera };
 
 // ── frame loop ──
 const clock = new THREE.Clock();
-const _up = new THREE.Vector3();
-const _tan = new THREE.Vector3();
+const _mainUp = new THREE.Vector3();
+const _mainTan = new THREE.Vector3();
 
 function animate() {
   requestAnimationFrame(animate);
@@ -194,11 +178,11 @@ function animate() {
   }
 
   // sun follows the player so local light always comes from "above"
-  upAt(player.theta, _up);
-  tangentAt(player.theta, _tan);
+  upAt(player.theta, _mainUp);
+  tangentAt(player.theta, _mainTan);
   sun.position.copy(player.pos)
-    .addScaledVector(_up, 320)
-    .addScaledVector(_tan, 150);
+    .addScaledVector(_mainUp, 320)
+    .addScaledVector(_mainTan, 150);
   sun.position.y += 110;
   sun.target.position.copy(player.pos);
 

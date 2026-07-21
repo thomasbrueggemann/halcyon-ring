@@ -1,10 +1,6 @@
 // ── Vegetation: instanced trees, bushes, grass tufts ────────────────────────
-import * as THREE from 'three';
-import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
-import { RF, DEG, DISTRICTS } from './config.js';
-import { placementMatrix } from './torusMath.js';
 
-const _m = new THREE.Matrix4();
+const _vegM = new THREE.Matrix4();
 const _c = new THREE.Color();
 
 function inArc(fromDeg, toDeg, rng) {
@@ -13,7 +9,7 @@ function inArc(fromDeg, toDeg, rng) {
   return ((a + rng() * (b - a)) % 360) * DEG;
 }
 
-export function buildVegetation(scene, textures, colliders, rng) {
+function buildVegetation(scene, textures, colliders, rng) {
   const veg = new THREE.Group();
   scene.add(veg);
 
@@ -203,8 +199,8 @@ export function buildVegetation(scene, textures, colliders, rng) {
     if (!list.length) return;
     const mesh = new THREE.InstancedMesh(geo, mats, list.length);
     list.forEach((pl, i) => {
-      placementMatrix(pl.theta, pl.lat, 0, pl.yaw, pl.scale, _m);
-      mesh.setMatrixAt(i, _m);
+      placementMatrix(pl.theta, pl.lat, 0, pl.yaw, pl.scale, _vegM);
+      mesh.setMatrixAt(i, _vegM);
       if (tintFn) mesh.setColorAt(i, tintFn(i));
     });
     if (tintFn) mesh.instanceColor.needsUpdate = true;

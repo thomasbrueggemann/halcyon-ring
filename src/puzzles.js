@@ -2,11 +2,8 @@
 // 1 Coolant valves (sequence)   2 Fuse hunt → power relay
 // 3 Spoke phase alignment (timing minigame)   4 Observatory access code
 // 5 Gyroscope calibration — only reachable while floating in zero-g
-import * as THREE from 'three';
-import { DEG } from './config.js';
-import { arcDelta } from './torusMath.js';
 
-export const PUZZLE_LIST = [
+const PUZZLE_LIST = [
   { id: 'coolant', label: 'Coolant loop — valve sequence',   place: 'Engineering Bay (48°)' },
   { id: 'power',   label: 'Power relay — 3 fuse cells',      place: 'Agricultural Belt (~100°)' },
   { id: 'spoke',   label: 'Spoke phase alignment',           place: 'Gamma Terminal (180°)' },
@@ -22,7 +19,7 @@ const HINTS = {
   gyro:    'Spoke F, 300°: the gyro panel sits 17 m up the shaft. Only reachable while gravity is down — ride the failure.',
 };
 
-export class PuzzleManager {
+class PuzzleManager {
   constructor({ stations, ui, audio, gravity, player, rng }) {
     this.s = stations;
     this.ui = ui;

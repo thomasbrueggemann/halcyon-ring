@@ -1,12 +1,10 @@
 // ── DOM HUD: prompts, objectives, alerts, minimap, modals, screens ──────────
-import { DEG } from './config.js';
-import { PUZZLE_LIST } from './puzzles.js';
 
 const STATION_ANGLES = {
   coolant: 48, power: 104, spoke: 180, code: 272, gyro: 300,
 };
 
-export class UI {
+class UI {
   constructor() {
     this.$ = id => document.getElementById(id);
     this.modal = null;

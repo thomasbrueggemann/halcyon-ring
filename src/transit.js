@@ -1,18 +1,13 @@
 // ── Ring monorail: a full-circumference elevated guideway + moving trains ───
 // Nothing sells "city in a loop" like transit that visibly goes all the way
 // around. Runs on the south side of the ring road at lat -10, deck at ~6 m.
-import * as THREE from 'three';
-import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
-import { RF, DEG } from './config.js';
-import { placementMatrix } from './torusMath.js';
-import { sweepProfile } from './world.js';
 
 const RAIL_LAT = -10;
 const DECK_H = 6.1;
 const TRAIN_SPEED = 16;        // m/s
 const CAR_LEN = 6.8, CAR_GAP = 1.0;
 
-export function buildTransit(scene, colliders, rng) {
+function buildTransit(scene, colliders, rng) {
   const group = new THREE.Group();
   scene.add(group);
 
