@@ -1,4 +1,13 @@
-// ── Procedural canvas textures ──────────────────────────────────────────────
+// ── Procedural textures ─────────────────────────────────────────────────────
+// Everything here is generated at load time — no downloaded assets.
+//
+// The old version drew single random PIXELS onto a canvas, which reads as TV
+// static up close and as flat mush at any distance, and it produced albedo
+// only, so every surface in the game was lit like coloured paper. This version
+// builds proper tileable multi-octave value-noise FIELDS, derives NORMAL and
+// ROUGHNESS maps from them, and hands three.js a full material set. That is
+// most of the difference between "flat shaded boxes" and something that reads
+// as real ground, stone and asphalt.
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -10,18 +19,155 @@ function mulberry32(seed) {
   };
 }
 
-function canvasTexture(size, draw, { repeat = [1, 1], srgb = true, aniso = 4 } = {}) {
-  const c = document.createElement('canvas');
-  c.width = size[0]; c.height = size[1];
-  draw(c.getContext('2d'), c.width, c.height);
-  const tex = new THREE.CanvasTexture(c);
+// ── Tileable fBm value noise ────────────────────────────────────────────────
+// Each octave gets its own small wrapping lattice, so the result tiles exactly
+// at `size` no matter how many octaves are stacked. Lattices are built once per
+// octave and then sampled, rather than hashing per pixel — that is the whole
+// difference between ~60 ms and ~2 s for a 512² field.
+// `aspect` > 1 stretches features along X (wind-streaked ripples, strata) by
+// using a coarser lattice across than down — done in the lattice rather than by
+// resampling, so the result still tiles exactly.
+function fbmField(size, cells, octaves, seed, { gain = 0.5, ridged = false, warp = 0, aspect = 1 } = {}) {
+  const out = new Float32Array(size * size);
+  let amp = 1, norm = 0, cx = Math.max(1, Math.round(cells / aspect)), cy = cells;
+  for (let o = 0; o < octaves; o++) {
+    const rnd = mulberry32((seed * 2654435761 + o * 40503) >>> 0);
+    const lat = new Float32Array(cx * cy);
+    for (let i = 0; i < lat.length; i++) lat[i] = rnd();
+    const stepX = size / cx, stepY = size / cy;
+    for (let y = 0; y < size; y++) {
+      const fy = y / stepY, y0 = Math.floor(fy), ty = fy - y0;
+      const sy = ty * ty * (3 - 2 * ty);
+      const r0 = (((y0 % cy) + cy) % cy) * cx, r1 = ((((y0 + 1) % cy) + cy) % cy) * cx;
+      const row = y * size;
+      for (let x = 0; x < size; x++) {
+        const fx = x / stepX, x0 = Math.floor(fx), tx = fx - x0;
+        const sx = tx * tx * (3 - 2 * tx);
+        const c0 = ((x0 % cx) + cx) % cx, c1 = (((x0 + 1) % cx) + cx) % cx;
+        const a = lat[r0 + c0] * (1 - sx) + lat[r0 + c1] * sx;
+        const b = lat[r1 + c0] * (1 - sx) + lat[r1 + c1] * sx;
+        let v = a * (1 - sy) + b * sy;
+        if (ridged) v = 1 - Math.abs(2 * v - 1);
+        out[row + x] += v * amp;
+      }
+    }
+    norm += amp; amp *= gain; cx *= 2; cy *= 2;
+  }
+  const inv = 1 / norm;
+  for (let i = 0; i < out.length; i++) out[i] *= inv;
+  if (warp > 0) {
+    // domain-warp by the field itself: turns bland blobs into flowing strata
+    const src = out.slice();
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const d = src[y * size + x] - 0.5;
+        const sx2 = (x + Math.round(d * warp) + size * 4) % size;
+        const sy2 = (y + Math.round(d * warp * 0.7) + size * 4) % size;
+        out[y * size + x] = src[sy2 * size + sx2];
+      }
+    }
+  }
+  return out;
+}
+
+function fieldStats(f) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < f.length; i++) { if (f[i] < lo) lo = f[i]; if (f[i] > hi) hi = f[i]; }
+  return { lo, hi };
+}
+// Stretch a field to the full 0..1 range — noise sums are always centre-heavy.
+function normalizeField(f) {
+  const { lo, hi } = fieldStats(f);
+  const k = hi > lo ? 1 / (hi - lo) : 1;
+  for (let i = 0; i < f.length; i++) f[i] = (f[i] - lo) * k;
+  return f;
+}
+
+function _makeTexture(canvas, { repeat = [1, 1], srgb = true, aniso = 8 } = {}) {
+  const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeat[0], repeat[1]);
   if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = aniso;
   return tex;
 }
+function _canvas(size) {
+  const c = document.createElement('canvas');
+  c.width = size[0]; c.height = size[1];
+  return c;
+}
 
+function canvasTexture(size, draw, opts = {}) {
+  const c = _canvas(size);
+  draw(c.getContext('2d'), c.width, c.height);
+  return _makeTexture(c, opts);
+}
+
+// ── Height field → tangent-space normal map ─────────────────────────────────
+// Sobel with wrap-around so the normal map tiles as cleanly as the height did.
+function normalMapFromField(field, size, strength, repeat) {
+  const c = _canvas([size, size]);
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  const at = (x, y) => field[(((y % size) + size) % size) * size + (((x % size) + size) % size)];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const gx = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1))
+               - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+      const gy = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1))
+               - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+      let nx = -gx * strength, ny = -gy * strength, nz = 1;
+      const inv = 1 / Math.hypot(nx, ny, nz);
+      nx *= inv; ny *= inv; nz *= inv;
+      const i = (y * size + x) * 4;
+      d[i] = (nx * 0.5 + 0.5) * 255;
+      d[i + 1] = (ny * 0.5 + 0.5) * 255;
+      d[i + 2] = (nz * 0.5 + 0.5) * 255;
+      d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return _makeTexture(c, { repeat, srgb: false });
+}
+
+// ── Field → greyscale map (roughness / AO / masks; always linear) ───────────
+function grayMapFromField(field, size, lo, hi, repeat) {
+  const c = _canvas([size, size]);
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let i = 0; i < field.length; i++) {
+    const v = (lo + (hi - lo) * field[i]) * 255;
+    d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+    d[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return _makeTexture(c, { repeat, srgb: false });
+}
+
+// ── Field(s) → coloured albedo through a ramp ───────────────────────────────
+// ramp(v, detail, x, y) returns [r, g, b] in 0..255.
+function albedoFromField(field, size, ramp, repeat, detail) {
+  const c = _canvas([size, size]);
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const col = ramp(field[i], detail ? detail[i] : 0, x, y);
+      d[i * 4] = col[0]; d[i * 4 + 1] = col[1]; d[i * 4 + 2] = col[2]; d[i * 4 + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return _makeTexture(c, { repeat });
+}
+
+// Blend helper for ramps
+function _mix(a, b, t) { return a + (b - a) * (t < 0 ? 0 : t > 1 ? 1 : t); }
+
+// ── Legacy speckle fill, still handy for small props ────────────────────────
 function noiseFill(ctx, w, h, rng, base, jitter, count) {
   ctx.fillStyle = base;
   ctx.fillRect(0, 0, w, h);
@@ -37,29 +183,226 @@ function noiseFill(ctx, w, h, rng, base, jitter, count) {
 function makeTextures() {
   const rng = mulberry32(1234);
   const T = {};
+  const S = 512;
 
-  T.grass = canvasTexture([512, 512], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#4e6b2f', 0.10, 9000);
-    // mid-scale patchiness
-    for (let i = 0; i < 60; i++) {
-      const g = 70 + rng() * 90;
-      ctx.fillStyle = `rgba(${g * 0.55},${g},${g * 0.3},${0.08 + rng() * 0.12})`;
-      ctx.beginPath();
-      ctx.ellipse(rng() * w, rng() * h, 30 + rng() * 90, 20 + rng() * 60, rng() * 3, 0, 7);
-      ctx.fill();
+  // ════════════════════ GROUND LAYER 1 — grass/meadow ════════════════════
+  {
+    const macro = normalizeField(fbmField(S, 3, 4, 11, { gain: 0.55 }));   // clumps and patches
+    const fine  = normalizeField(fbmField(S, 24, 4, 12, { gain: 0.5 }));   // blade-scale break-up
+    const dry   = normalizeField(fbmField(S, 5, 3, 13, { gain: 0.5 }));    // sun-bleached areas
+    T.grass = albedoFromField(macro, S, (m, f) => {
+      const t = m * 0.65 + f * 0.35;
+      return [_mix(42, 88, t), _mix(70, 124, t), _mix(26, 45, t)];
+    }, [26, 26], fine);
+    // second pass: fold the dryness field in, plus fine blade streaks
+    {
+      const ctx = T.grass.image.getContext('2d');
+      const img = ctx.getImageData(0, 0, S, S);
+      const d = img.data;
+      for (let i = 0; i < S * S; i++) {
+        const k = dry[i] * dry[i] * dry[i];              // cubed: sun-bleached patches stay rare
+        d[i * 4]     = _mix(d[i * 4],     _mix(d[i * 4], 146, 0.5), k);
+        d[i * 4 + 1] = _mix(d[i * 4 + 1], _mix(d[i * 4 + 1], 138, 0.5), k);
+        d[i * 4 + 2] = _mix(d[i * 4 + 2], _mix(d[i * 4 + 2], 72, 0.5), k);
+      }
+      ctx.putImageData(img, 0, 0);
+      ctx.globalAlpha = 0.5;
+      for (let i = 0; i < 5200; i++) {
+        const x = rng() * S, y = rng() * S, g = 88 + rng() * 76;
+        ctx.strokeStyle = `rgba(${g * 0.5},${g},${g * 0.32},0.5)`;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, y);
+        ctx.lineTo(x + (rng() - 0.5) * 5, y - 3 - rng() * 6); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      T.grass.needsUpdate = true;
     }
-    for (let i = 0; i < 2600; i++) {
-      const x = rng() * w, y = rng() * h;
-      const g = 90 + rng() * 70;
-      ctx.strokeStyle = `rgba(${g * 0.55},${g},${g * 0.32},0.35)`;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(x, y);
-      ctx.lineTo(x + (rng() - 0.5) * 5, y - 3 - rng() * 5); ctx.stroke();
-    }
-  }, { repeat: [40, 40] });
+    // grass normals are gentle — strong ones look like crumpled foil at distance
+    const bump = new Float32Array(S * S);
+    for (let i = 0; i < bump.length; i++) bump[i] = macro[i] * 0.55 + fine[i] * 0.45;
+    T.grassN = normalMapFromField(bump, S, 0.9, [26, 26]);
+    T.grassR = grayMapFromField(macro, S, 0.98, 0.80, [26, 26]);
+  }
 
-  // huge soft blotches, laid over the floor at very low frequency to break
-  // up grass tiling across the ring
+  // ════════════════════ GROUND LAYER 2 — rock/scree ════════════════════
+  {
+    const strata = normalizeField(fbmField(S, 4, 5, 21, { gain: 0.55, ridged: true, warp: 26 }));
+    const grit   = normalizeField(fbmField(S, 40, 3, 22, { gain: 0.5 }));
+    T.rock = albedoFromField(strata, S, (v, g) => {
+      const t = v * 0.75 + g * 0.25;
+      // cool grey stone with warm iron staining in the crevices
+      const warm = Math.pow(1 - v, 2.2);
+      return [
+        _mix(58, 122, t) + warm * 20,
+        _mix(57, 117, t) + warm * 9,
+        _mix(55, 110, t) - warm * 4,
+      ];
+    }, [16, 16], grit);
+    const bump = new Float32Array(S * S);
+    for (let i = 0; i < bump.length; i++) bump[i] = strata[i] * 0.8 + grit[i] * 0.2;
+    T.rockN = normalMapFromField(bump, S, 5.5, [16, 16]);
+    T.rockR = grayMapFromField(strata, S, 0.92, 0.62, [16, 16]);
+  }
+
+  // ════════════════════ GROUND LAYER 3 — sand / river shingle ════════════
+  {
+    const dunes = normalizeField(fbmField(S, 6, 4, 31, { gain: 0.5 }));
+    const grain = normalizeField(fbmField(S, 64, 3, 32, { gain: 0.5 }));
+    T.sand = albedoFromField(dunes, S, (v, g) => {
+      const t = v * 0.6 + g * 0.4;
+      return [_mix(132, 186, t), _mix(114, 166, t), _mix(84, 126, t)];
+    }, [14, 14], grain);
+    {   // scattered pebbles and damp patches near the waterline
+      const ctx = T.sand.image.getContext('2d');
+      for (let i = 0; i < 260; i++) {
+        ctx.fillStyle = rng() < 0.5 ? 'rgba(112,98,76,0.42)' : 'rgba(238,230,206,0.4)';
+        ctx.beginPath(); ctx.arc(rng() * S, rng() * S, 1 + rng() * 2.6, 0, 7); ctx.fill();
+      }
+      T.sand.needsUpdate = true;
+    }
+    const bump = new Float32Array(S * S);
+    for (let i = 0; i < bump.length; i++) bump[i] = dunes[i] * 0.35 + grain[i] * 0.65;
+    T.sandN = normalMapFromField(bump, S, 1.6, [14, 14]);
+    T.sandR = grayMapFromField(grain, S, 1.0, 0.86, [14, 14]);
+  }
+
+  // ════════════════════ Asphalt ════════════════════
+  {
+    const patch = normalizeField(fbmField(S, 4, 4, 41, { gain: 0.55 }));
+    const agg   = normalizeField(fbmField(S, 90, 2, 42, { gain: 0.5 }));   // aggregate grain
+    T.asphalt = albedoFromField(patch, S, (v, a) => {
+      const t = v * 0.4 + a * 0.6;
+      const base = _mix(44, 86, t);
+      return [base, base * 1.01, base * 1.07];
+    }, [2, 90], agg);
+    {   // repair scars and tyre polish down the wheel tracks
+      const ctx = T.asphalt.image.getContext('2d');
+      ctx.strokeStyle = 'rgba(24,26,30,0.30)';
+      for (let i = 0; i < 26; i++) {
+        ctx.lineWidth = 1 + rng() * 4;
+        ctx.beginPath();
+        let x = rng() * S, y = rng() * S;
+        ctx.moveTo(x, y);
+        for (let k = 0; k < 5; k++) { x += (rng() - 0.5) * 90; y += (rng() - 0.3) * 90; ctx.lineTo(x, y); }
+        ctx.stroke();
+      }
+      for (const cx of [S * 0.28, S * 0.72]) {
+        const g = ctx.createLinearGradient(cx - S * 0.09, 0, cx + S * 0.09, 0);
+        g.addColorStop(0, 'rgba(150,150,155,0)');
+        g.addColorStop(0.5, 'rgba(150,150,155,0.10)');
+        g.addColorStop(1, 'rgba(150,150,155,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(cx - S * 0.09, 0, S * 0.18, S);
+      }
+      T.asphalt.needsUpdate = true;
+    }
+    T.asphaltN = normalMapFromField(agg, S, 0.3, [2, 90]);
+    T.asphaltR = grayMapFromField(patch, S, 0.94, 0.74, [2, 90]);
+  }
+
+  // ════════════════════ Gravel shoulder / footpath ════════════════════
+  {
+    const stones = normalizeField(fbmField(S, 34, 3, 51, { gain: 0.45 }));
+    const dustF  = normalizeField(fbmField(S, 5, 3, 52, { gain: 0.5 }));
+    T.dirt = albedoFromField(dustF, S, (v, s) => {
+      const t = v * 0.45 + s * 0.55;
+      return [_mix(94, 158, t), _mix(80, 136, t), _mix(62, 106, t)];
+    }, [22, 22], stones);
+    T.dirtN = normalMapFromField(stones, S, 2.6, [22, 22]);
+    T.dirtR = grayMapFromField(stones, S, 1.0, 0.85, [22, 22]);
+    T.gravel = T.dirt; T.gravelN = T.dirtN;
+  }
+
+  // ════════════════════ Concrete / paving ════════════════════
+  {
+    const blot = normalizeField(fbmField(S, 6, 4, 61, { gain: 0.5 }));
+    const pore = normalizeField(fbmField(S, 70, 2, 62, { gain: 0.5 }));
+    T.plaza = albedoFromField(blot, S, (v, p) => {
+      const t = v * 0.6 + p * 0.4;
+      const g = _mix(92, 142, t);
+      return [g * 1.02, g, g * 0.95];
+    }, [7, 7], pore);
+    {   // slab joints
+      const ctx = T.plaza.image.getContext('2d');
+      ctx.strokeStyle = 'rgba(58,56,52,0.42)'; ctx.lineWidth = 2.5;
+      for (let i = 0; i <= 4; i++) {
+        ctx.beginPath(); ctx.moveTo(i * S / 4, 0); ctx.lineTo(i * S / 4, S); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i * S / 4); ctx.lineTo(S, i * S / 4); ctx.stroke();
+      }
+      T.plaza.needsUpdate = true;
+    }
+    T.concrete = T.plaza;
+    const bump = new Float32Array(S * S);
+    for (let i = 0; i < bump.length; i++) bump[i] = pore[i] * 0.7 + blot[i] * 0.3;
+    T.plazaN = normalMapFromField(bump, S, 1.2, [7, 7]);
+    T.concreteN = T.plazaN;
+    T.plazaR = grayMapFromField(blot, S, 0.86, 0.6, [7, 7]);
+  }
+
+  // ════════════════════ Water ════════════════════
+  // Two ripple normal maps at different scales, scrolled against each other in
+  // world.js's water shader — that cross-beat is what makes a flat plane read
+  // as a moving surface.
+  {
+    const makeRipple = (cells, seed, strength, size) => {
+      // aspect 2.4: ripple crests run across the flow, as wind chop does
+      const f = normalizeField(fbmField(size, cells, 4, seed, { gain: 0.55, warp: 12, aspect: 2.4 }));
+      return normalMapFromField(f, size, strength, [1, 1]);
+    };
+    T.waterN1 = makeRipple(7, 71, 3.2, 256);
+    T.waterN2 = makeRipple(17, 72, 2.0, 256);
+    // legacy flat water albedo, still used as a fallback tint
+    T.water = canvasTexture([128, 128], (ctx, w, h) => {
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, '#2c5f70'); g.addColorStop(1, '#1d4553');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    }, { repeat: [1, 1] });
+    T.foam = canvasTexture([128, 128], (ctx, w, h) => {
+      ctx.clearRect(0, 0, w, h);
+      for (let i = 0; i < 300; i++) {
+        ctx.fillStyle = `rgba(255,255,255,${0.06 + rng() * 0.2})`;
+        ctx.beginPath(); ctx.ellipse(rng() * w, rng() * h, 2 + rng() * 9, 1 + rng() * 3, rng() * 3, 0, 7); ctx.fill();
+      }
+    });
+  }
+
+  // ════════════════════ Hull plating ════════════════════
+  {
+    const wear = normalizeField(fbmField(S, 8, 4, 81, { gain: 0.5 }));
+    T.hull = albedoFromField(wear, S, (v) => {
+      const g = _mix(150, 196, v);
+      return [g, g * 1.01, g * 1.05];
+    }, [180, 3]);
+    {
+      const ctx = T.hull.image.getContext('2d');
+      ctx.strokeStyle = 'rgba(78,84,94,0.55)'; ctx.lineWidth = 4;
+      for (let i = 0; i <= 4; i++) {
+        ctx.beginPath(); ctx.moveTo(i * S / 4, 0); ctx.lineTo(i * S / 4, S); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i * S / 4); ctx.lineTo(S, i * S / 4); ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(64,70,80,0.5)';
+      for (let i = 0; i < 420; i++) {           // rivet lines along the seams
+        const seam = Math.floor(rng() * 5) * S / 4;
+        const along = rng() * S;
+        const vert = rng() < 0.5;
+        ctx.beginPath();
+        ctx.arc(vert ? seam + (rng() < 0.5 ? -7 : 7) : along, vert ? along : seam + (rng() < 0.5 ? -7 : 7), 1.7, 0, 7);
+        ctx.fill();
+      }
+      T.hull.needsUpdate = true;
+    }
+    T.hullN = normalMapFromField(wear, S, 1.0, [180, 3]);
+  }
+
+  // ════════════════════ Detail overlay ════════════════════
+  // High-frequency grey noise multiplied over the terrain in the splat shader
+  // to break the macro tiling that any repeated ground texture shows.
+  {
+    const f = normalizeField(fbmField(256, 12, 4, 91, { gain: 0.5 }));
+    T.detail = grayMapFromField(f, 256, 0.72, 1.28, [1, 1]);
+  }
+
+  // huge soft blotches, laid over the floor at very low frequency
   T.mottle = canvasTexture([256, 256], (ctx, w, h) => {
     ctx.clearRect(0, 0, w, h);
     for (let i = 0; i < 26; i++) {
@@ -74,39 +417,7 @@ function makeTextures() {
     }
   });
 
-  T.dirt = canvasTexture([256, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#7a6448', 0.13, 5000);
-  }, { repeat: [30, 30] });
-
-  T.asphalt = canvasTexture([256, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#3c3f44', 0.10, 6000);
-  }, { repeat: [3, 200] });
-
-  T.plaza = canvasTexture([512, 512], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#9a938a', 0.06, 4000);
-    ctx.strokeStyle = 'rgba(40,38,35,0.45)'; ctx.lineWidth = 3;
-    const step = w / 8;
-    for (let i = 0; i <= 8; i++) {
-      ctx.beginPath(); ctx.moveTo(i * step, 0); ctx.lineTo(i * step, h); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, i * step); ctx.lineTo(w, i * step); ctx.stroke();
-    }
-  }, { repeat: [8, 8] });
-
-  T.hull = canvasTexture([512, 512], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#b8bcc2', 0.05, 3000);
-    ctx.strokeStyle = 'rgba(70,76,86,0.55)'; ctx.lineWidth = 4;
-    for (let i = 0; i <= 4; i++) {
-      ctx.beginPath(); ctx.moveTo(i * w / 4, 0); ctx.lineTo(i * w / 4, h); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, i * h / 4); ctx.lineTo(w, i * h / 4); ctx.stroke();
-    }
-    for (let i = 0; i < 260; i++) {
-      const x = rng() * w, y = rng() * h;
-      ctx.fillStyle = 'rgba(60,64,72,0.5)';
-      ctx.beginPath(); ctx.arc(x, y, 1.6, 0, 7); ctx.fill();
-    }
-  }, { repeat: [220, 3] });
-
-  // House wall variants: plaster with framed windows + a door
+  // ── House wall variants: plaster with framed windows + a door ──
   function wallDraw(base, trim) {
     return (ctx, w, h) => {
       noiseFill(ctx, w, h, rng, base, 0.05, 2500);
@@ -129,6 +440,11 @@ function makeTextures() {
           ctx.strokeStyle = trim; ctx.lineWidth = 3;
           ctx.beginPath(); ctx.moveTo(x + ww / 2, y); ctx.lineTo(x + ww / 2, y + wh);
           ctx.moveTo(x, y + wh / 2); ctx.lineTo(x + ww, y + wh / 2); ctx.stroke();
+          // sill + lintel shadow so the opening reads as recessed
+          ctx.fillStyle = 'rgba(0,0,0,0.22)';
+          ctx.fillRect(x, y, ww, 3);
+          ctx.fillStyle = 'rgba(255,255,255,0.16)';
+          ctx.fillRect(x - 4, y + wh + 4, ww + 8, 3);
         }
       }
     };
@@ -136,6 +452,10 @@ function makeTextures() {
   T.wallA = canvasTexture([512, 256], wallDraw('#d8cfc0', '#7d6a55'));
   T.wallB = canvasTexture([512, 256], wallDraw('#c2ccd4', '#4c5a66'));
   T.wallC = canvasTexture([512, 256], wallDraw('#d9c4a9', '#8a5a40'));
+  {   // one shared plaster relief map for all three
+    const f = normalizeField(fbmField(256, 20, 3, 101, { gain: 0.5 }));
+    T.wallN = normalMapFromField(f, 256, 1.0, [1, 1]);
+  }
 
   // matching lit-window emissive maps (same deterministic window grid)
   function wallEmissive() {
@@ -166,6 +486,9 @@ function makeTextures() {
       const gY = h * 0.82;                 // storefront band below
       const floorH = gY / floors;
       for (let f = 0; f < floors; f++) {
+        // spandrel band between floors reads as a real slab edge
+        ctx.fillStyle = 'rgba(0,0,0,0.10)';
+        ctx.fillRect(0, f * floorH, w, 3);
         for (let c = 0; c < cols; c++) {
           const x = (c + 0.18) * (w / cols), y = f * floorH + floorH * 0.22;
           const ww = (w / cols) * 0.64, wh = floorH * 0.56;
@@ -173,6 +496,7 @@ function makeTextures() {
           const sky = ctx.createLinearGradient(0, y, 0, y + wh);
           sky.addColorStop(0, '#8fa9bd'); sky.addColorStop(1, '#42566a');
           ctx.fillStyle = sky; ctx.fillRect(x, y, ww, wh);
+          ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(x, y, ww, 2.5);
           if (rng() < 0.4) litRects.push([x, y, ww, wh, false]);
         }
       }
@@ -195,9 +519,12 @@ function makeTextures() {
   T.blockC = blockPair(3, '#c4b49e', '#5a4a3a');
 
   T.roof = canvasTexture([256, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#6d4438', 0.08, 2500);
-    ctx.strokeStyle = 'rgba(30,18,14,0.5)'; ctx.lineWidth = 2;
+    noiseFill(ctx, w, h, rng, '#7c4c3c', 0.08, 2500);
     for (let y = 0; y < h; y += 16) {
+      // pantile courses with a highlight ridge and a shadow gap
+      ctx.fillStyle = 'rgba(255,196,150,0.14)';
+      ctx.fillRect(0, y + 2, w, 4);
+      ctx.strokeStyle = 'rgba(30,18,14,0.5)'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
       for (let x = (y / 16) % 2 ? 16 : 0; x < w; x += 32) {
         ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 16); ctx.stroke();
@@ -207,9 +534,16 @@ function makeTextures() {
 
   T.roofSlate = canvasTexture([256, 256], (ctx, w, h) => {
     noiseFill(ctx, w, h, rng, '#4a5058', 0.08, 2500);
-    ctx.strokeStyle = 'rgba(15,18,22,0.5)'; ctx.lineWidth = 2;
-    for (let y = 0; y < h; y += 14) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+    for (let y = 0; y < h; y += 14) {
+      ctx.fillStyle = 'rgba(180,196,214,0.10)'; ctx.fillRect(0, y + 2, w, 3);
+      ctx.strokeStyle = 'rgba(15,18,22,0.5)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
   }, { repeat: [2, 2] });
+  {
+    const f = normalizeField(fbmField(256, 16, 3, 111, { gain: 0.5 }));
+    T.roofN = normalMapFromField(f, 256, 1.6, [2, 2]);
+  }
 
   T.bark = canvasTexture([128, 256], (ctx, w, h) => {
     noiseFill(ctx, w, h, rng, '#5c4632', 0.12, 2200);
@@ -221,16 +555,6 @@ function makeTextures() {
       ctx.bezierCurveTo(x + 8, h * 0.3, x - 8, h * 0.6, x + 4, h); ctx.stroke();
     }
   }, { repeat: [1, 1] });
-
-  T.water = canvasTexture([256, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#2e5f6e', 0.05, 2000);
-    for (let i = 0; i < 60; i++) {
-      ctx.strokeStyle = 'rgba(210,235,240,0.12)'; ctx.lineWidth = 1.5;
-      const y = rng() * h;
-      ctx.beginPath(); ctx.moveTo(0, y);
-      ctx.bezierCurveTo(w * 0.3, y + 6, w * 0.6, y - 6, w, y); ctx.stroke();
-    }
-  }, { repeat: [12, 12] });
 
   T.crops = canvasTexture([256, 256], (ctx, w, h) => {
     noiseFill(ctx, w, h, rng, '#6b5a3a', 0.10, 2000);

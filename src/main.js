@@ -13,41 +13,81 @@ document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000104);
-scene.fog = new THREE.FogExp2(0xc3d9e8, 0.00085);
+// You can see 1.9 km across the ring to the far side, so aerial perspective is
+// doing real work here: without it the opposite hillside reads as a flat sticker.
+scene.fog = new THREE.FogExp2(0xb6cfd8, 0.00082);
 
 const camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 60000);
 scene.add(camera);
 
+// ── image-based lighting ────────────────────────────────────────────────────
+// A tiny painted equirect of what the interior actually surrounds you with —
+// bright glazing overhead, green valley below, sun blob — run through PMREM.
+// This is what gives water, glass and metal believable specular; without an
+// environment they can only reflect a constant ambient and look like plastic.
+{
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 128;
+  const g = c.getContext('2d');
+  const sky = g.createLinearGradient(0, 0, 0, 128);
+  sky.addColorStop(0.00, '#dff0fb');       // straight up through the glass
+  sky.addColorStop(0.34, '#b9d6e8');
+  sky.addColorStop(0.50, '#9fb6ad');       // the far hillsides at eye level
+  sky.addColorStop(0.66, '#6f8a55');
+  sky.addColorStop(1.00, '#43532f');       // ground
+  g.fillStyle = sky;
+  g.fillRect(0, 0, 256, 128);
+  const sunGlow = g.createRadialGradient(70, 26, 0, 70, 26, 46);
+  sunGlow.addColorStop(0, 'rgba(255,252,238,1)');
+  sunGlow.addColorStop(0.25, 'rgba(255,242,208,0.55)');
+  sunGlow.addColorStop(1, 'rgba(255,236,190,0)');
+  g.fillStyle = sunGlow;
+  g.fillRect(0, 0, 256, 128);
+  const envTex = new THREE.CanvasTexture(c);
+  envTex.mapping = THREE.EquirectangularReflectionMapping;
+  envTex.colorSpace = THREE.SRGBColorSpace;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  scene.environment = pmrem.fromEquirectangular(envTex).texture;
+  pmrem.dispose();
+  envTex.dispose();
+}
+
 // ── lights ──
-const sun = new THREE.DirectionalLight(0xfff2e0, 2.6);
+const sun = new THREE.DirectionalLight(0xfff2e0, 2.5);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.left = -95; sun.shadow.camera.right = 95;
 sun.shadow.camera.top = 95; sun.shadow.camera.bottom = -95;
 sun.shadow.camera.near = 1; sun.shadow.camera.far = 900;
 sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.035;
 scene.add(sun, sun.target);
 
-const hemi = new THREE.HemisphereLight(0xbfd9ee, 0x51663d, 0.55);
+// With IBL carrying the ambient term, the fill lights drop right back —
+// leaving them where they were washed out every shadow the sun cast.
+const hemi = new THREE.HemisphereLight(0xbfd9ee, 0x51663d, 0.30);
 scene.add(hemi);
-scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+scene.add(new THREE.AmbientLight(0xffffff, 0.10));
 
 // ── build the world ──
 const rng = mulberry32(WORLD_SEED);
 const textures = makeTextures();
 const colliders = new Colliders();
 const sky = buildSky(scene);
-buildWorld(scene, textures);
+const world = buildWorld(scene, textures, colliders);
 const { stations } = buildCity(scene, textures, colliders, rng);
 const transit = buildTransit(scene, colliders, rng);
 buildVegetation(scene, textures, colliders, rng);
 const props = buildProps(scene, textures, rng);
 
 const player = new Player(camera, colliders);
+transit.player = player;
 const gravity = new GravitySystem(rng);
 const ui = new UI();
 const audio = new AudioEngine();
 const puzzles = new PuzzleManager({ stations, ui, audio, gravity, player, rng });
+const npcs = buildNPCs(scene, rng);   // appended after all existing rng consumers
 
 // zero-g drifting leaves/dust around the player
 const driftGroup = new THREE.Group();
@@ -135,7 +175,9 @@ document.addEventListener('pointerlockchange', () => {
 });
 
 document.addEventListener('keydown', e => {
-  if (e.code === 'KeyE' && player.enabled && !ui.modal) puzzles.tryInteract();
+  if (e.code === 'KeyE' && player.enabled && !ui.modal) {
+    if (!transit.tryInteract()) puzzles.tryInteract();
+  }
   if (e.code === 'KeyG' && player.enabled) {           // sandbox: force a failure
     if (gravity.mode === 'stable' && !gravity.stabilized) gravity.triggerFailure();
   }
@@ -147,7 +189,7 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-window.__game = { player, gravity, puzzles, stations, scene, camera };
+window.__game = { player, gravity, puzzles, stations, scene, camera, transit, npcs };
 
 // ── frame loop ──
 const clock = new THREE.Clock();
@@ -166,7 +208,9 @@ function animate() {
   player.update(dt, gScale);
   transit.update(dt);
   props.update(dt, gScale, gravity.zeroG);
+  npcs.update(dt, gScale, gravity.zeroG, player);
   puzzles.update(dt);
+  if (transit.prompt) ui.setPrompt(transit.prompt);   // transit hint overrides
   sky.update(gravity.spinAngle);
 
   // camera shake during spin-down
@@ -187,7 +231,7 @@ function animate() {
   sun.target.position.copy(player.pos);
 
   // ambient animation
-  if (stations.waterMat) stations.waterMat.map.offset.x = t * 0.008;
+  world.update(t);
   driftGroup.position.copy(player.pos);
   driftGroup.rotation.y = t * 0.03;
   driftGroup.rotation.x = t * 0.017;

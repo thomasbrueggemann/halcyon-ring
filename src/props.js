@@ -38,10 +38,13 @@ function buildProps(scene, textures, rng) {
       }
       mesh.castShadow = true;
       const theta = (area.fromDeg + rng() * (area.toDeg - area.fromDeg)) * DEG;
-      const lat = (rng() < 0.5 ? -1 : 1) * (8.5 + rng() * 14);
+      const side = rng() < 0.5 ? -1 : 1;
+      // hug the real road, but never off the floor band — roadLat wanders to
+      // ∓49 m, so an unclamped offset lands outside the hull.
+      const lat = Math.max(-BUILD_LAT, Math.min(BUILD_LAT, roadLat(theta) + side * (8.5 + rng() * 14)));
       const p = {
         mesh, half,
-        pos: torusPosition(theta, lat, half, new THREE.Vector3()),
+        pos: torusPosition(theta, lat, groundH(theta, lat, Infinity) + half, new THREE.Vector3()),
         vel: new THREE.Vector3(),
         rot: new THREE.Vector3(),
       };
@@ -72,9 +75,10 @@ function buildProps(scene, textures, rng) {
 
       const t2 = worldToTorus(p.pos);
       upAt(t2.theta, _propsUp);
-      // floor
-      if (t2.h < p.half) {
-        const pen = p.half - t2.h;
+      // floor (terrain-aware)
+      const gp = groundH(t2.theta, t2.lat, t2.h);
+      if (t2.h < gp + p.half) {
+        const pen = gp + p.half - t2.h;
         p.pos.addScaledVector(_propsUp, pen);
         const vUp = p.vel.dot(_propsUp);
         if (vUp < 0) {

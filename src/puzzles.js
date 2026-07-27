@@ -61,11 +61,18 @@ class PuzzleManager {
   _buildInteractables() {
     const S = this.s;
     const list = [];
+    // Every set-piece is placed with city.js's gm(), i.e. its h is measured from
+    // the ground at that spot — and since the terrain rebuild, set-piece pads
+    // sit at their own local height rather than always at h = 0. Resolve each
+    // interactable to an ABSOLUTE h here, or the proximity test below compares
+    // the player's absolute height against a relative one and nothing on a
+    // raised pad can ever be reached.
+    const abs = (theta, lat, h) => h + groundH(theta, lat, Infinity);
 
     // 1 — valves
     for (const v of S.valves) {
       list.push({
-        theta: v.theta, lat: v.lat, h: v.h, radius: 2.4,
+        theta: v.theta, lat: v.lat, h: abs(v.theta, v.lat, v.h), radius: 2.4,
         prompt: () => this.solved.coolant ? null : `[E] Turn valve ${v.index + 1}`,
         enabled: () => !this.solved.coolant,
         action: () => {
@@ -90,7 +97,7 @@ class PuzzleManager {
     // 2 — fuse pickups + relay
     for (const f of S.fuses) {
       list.push({
-        theta: f.theta, lat: f.lat, h: f.h, radius: 2.2,
+        theta: f.theta, lat: f.lat, h: abs(f.theta, f.lat, f.h), radius: 2.2,
         prompt: () => `[E] Take fuse cell`,
         enabled: () => !f.taken && !this.solved.power,
         action: () => {
@@ -104,7 +111,7 @@ class PuzzleManager {
       });
     }
     list.push({
-      theta: S.relay.theta, lat: S.relay.lat, h: 1.2, radius: 2.6,
+      theta: S.relay.theta, lat: S.relay.lat, h: abs(S.relay.theta, S.relay.lat, 1.2), radius: 2.6,
       prompt: () => this.solved.power ? null
         : this.carried > 0 ? `[E] Insert ${this.carried} fuse cell${this.carried > 1 ? 's' : ''}`
         : 'Relay cabinet — needs fuse cells',
@@ -126,7 +133,7 @@ class PuzzleManager {
 
     // 3 — spoke alignment console
     list.push({
-      theta: S.alignConsole.theta, lat: S.alignConsole.lat, h: 1.3, radius: 2.6,
+      theta: S.alignConsole.theta, lat: S.alignConsole.lat, h: abs(S.alignConsole.theta, S.alignConsole.lat, 1.3), radius: 2.6,
       prompt: () => this.solved.spoke ? null : '[E] Run spoke phase alignment',
       enabled: () => !this.solved.spoke,
       action: () => {
@@ -141,7 +148,7 @@ class PuzzleManager {
 
     // 4 — observatory code console
     list.push({
-      theta: S.codeConsole.theta, lat: S.codeConsole.lat, h: 1.3, radius: 2.6,
+      theta: S.codeConsole.theta, lat: S.codeConsole.lat, h: abs(S.codeConsole.theta, S.codeConsole.lat, 1.3), radius: 2.6,
       prompt: () => this.solved.code ? null : '[E] Observatory uplink terminal',
       enabled: () => !this.solved.code,
       action: () => {
@@ -156,7 +163,7 @@ class PuzzleManager {
 
     // 5 — gyro panel (zero-g only)
     list.push({
-      theta: S.gyroPanel.theta, lat: S.gyroPanel.lat, h: S.gyroPanel.h, radius: 3.4,
+      theta: S.gyroPanel.theta, lat: S.gyroPanel.lat, h: abs(S.gyroPanel.theta, S.gyroPanel.lat, S.gyroPanel.h), radius: 3.4,
       prompt: () => this.solved.gyro ? null : '[E] Calibrate gyroscope',
       enabled: () => !this.solved.gyro && this.gravity.zeroG,
       action: () => {
@@ -168,7 +175,7 @@ class PuzzleManager {
 
     // plaza info terminal — hints
     list.push({
-      theta: S.plazaTerminal.theta, lat: S.plazaTerminal.lat, h: 1.3, radius: 2.6,
+      theta: S.plazaTerminal.theta, lat: S.plazaTerminal.lat, h: abs(S.plazaTerminal.theta, S.plazaTerminal.lat, 1.3), radius: 2.6,
       prompt: () => '[E] Station status terminal',
       enabled: () => true,
       action: () => {

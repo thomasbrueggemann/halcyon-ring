@@ -14,17 +14,22 @@ const _tmp = new THREE.Vector3();
 const P_Y_AXIS = new THREE.Vector3(0, 1, 0);
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 
+// Movement limits that only matter now the ground has real relief.
+const SLOPE_WALK = 0.62;   // rise/run you can still walk up unaided (~32°)
+const SLOPE_MAX  = 1.35;   // beyond this you slide back down at full rate
+const SWIM_DEPTH = 1.35;   // water deeper than this and your feet leave the bed
+
 class Player {
   constructor(camera, colliders) {
     this.camera = camera;
     this.colliders = colliders;
 
-    this.theta = 4.3 * Math.PI / 180;   // spawn on the plaza, west of the fountain
-    this.lat = -13;
-    this.h = 0;
+    this.theta = 4.6 * Math.PI / 180;   // spawn on the plaza, west of the fountain
+    this.lat = -9;
+    this.h = groundH(this.theta, this.lat, Infinity);
     this.pos = torusPosition(this.theta, this.lat, this.h, new THREE.Vector3());
     this.vel = new THREE.Vector3();
-    this.yaw = 0;                  // face along +theta, toward the fountain
+    this.yaw = 0.42;               // face along +theta, angled toward the fountain
     this.pitch = 0;
     this.grounded = true;
     this.bob = 0;
@@ -32,6 +37,9 @@ class Player {
     this.keys = new Set();
     this.enabled = false;
     this.fovTarget = 72;
+    this.ride = null;              // set by transit when boarding a train
+    this.wadeDepth = 0;            // >0 while standing in the river
+    this.swimming = false;
 
     document.addEventListener('keydown', e => {
       if (e.code === 'Space') e.preventDefault();
@@ -50,6 +58,26 @@ class Player {
 
   update(dt, gravityScale) {
     const zeroG = gravityScale < 0.06;
+
+    // ── riding a train: glued to a seat, free mouse-look, WASD/gravity ignored ──
+    if (this.ride) {
+      this.ride.getSeat(this.pos);              // seat feet → this.pos (world)
+      const rt = worldToTorus(this.pos);
+      this.theta = rt.theta; this.lat = rt.lat; this.h = rt.h;
+      this.grounded = true; this.speedAlongGround = 0;
+      this.vel.set(0, 0, 0);
+      frameQuaternion(this.theta, _pQ);
+      _qYaw.setFromAxisAngle(P_Y_AXIS, this.yaw);
+      _qPitch.setFromAxisAngle(X_AXIS, this.pitch);
+      _pQ.multiply(_qYaw).multiply(_qPitch);
+      this.camera.quaternion.copy(_pQ);
+      torusPosition(this.theta, this.lat, this.h + EYE_HEIGHT, this.camera.position);
+      this.fovTarget = 72;
+      this.camera.fov += (this.fovTarget - this.camera.fov) * Math.min(1, 4 * dt);
+      this.camera.updateProjectionMatrix();
+      return;
+    }
+
     upAt(this.theta, _pUp);
     tangentAt(this.theta, _pTan);
 
@@ -83,7 +111,10 @@ class Player {
     } else if (this.enabled) {
       // ── walking under spin gravity ──
       const running = this.key('ShiftLeft') || this.key('ShiftRight');
-      const speed = (running ? RUN_SPEED : WALK_SPEED);
+      // Wading costs you speed; once it is over chest height you are swimming.
+      const wade = this.wadeDepth;
+      const drag = wade > 0 ? 1 - 0.62 * Math.min(1, wade / 1.3) : 1;
+      const speed = (running ? RUN_SPEED : WALK_SPEED) * drag;
       _wish.set(0, 0, 0);
       _wish.addScaledVector(_fwd, iz).addScaledVector(_right, ix);
       // keep the wish vector in the tangent plane
@@ -93,7 +124,7 @@ class Player {
       // split velocity into vertical + horizontal parts
       const vUp = this.vel.dot(_pUp);
       _tmp.copy(this.vel).addScaledVector(_pUp, -vUp);   // horizontal
-      const accel = this.grounded ? 14 : 3;
+      const accel = this.grounded ? 14 : (this.swimming ? 6 : 3);
       _tmp.lerp(_wish, Math.min(1, accel * dt));
       this.vel.copy(_tmp).addScaledVector(_pUp, vUp);
       this.speedAlongGround = _tmp.length();
@@ -113,13 +144,73 @@ class Player {
     this.theta = t.theta; this.lat = t.lat; this.h = t.h;
     upAt(this.theta, _pUp);
 
-    // ── floor ──
+    // ── floor (terrain-aware) ──
+    const g = groundH(this.theta, this.lat, this.h);
+    const wasGrounded = this.grounded;
     this.grounded = false;
-    if (this.h <= 0) {
-      this.h = 0;
+    if (this.h <= g) {
+      // A kerb, a doorstep or the lip of a bridge deck is walked over rather
+      // than stopped dead against: the ground query absorbs the rise, and
+      // anything tall enough to be a real wall carries a collider instead.
+      this.h = g;
       const vUp = this.vel.dot(_pUp);
       if (vUp < 0) this.vel.addScaledVector(_pUp, -vUp * (zeroG ? 1.4 : 1)); // soft bounce in zero-g
       if (!zeroG) this.grounded = true;
+    } else if (!zeroG && wasGrounded && this.h - g < 0.45) {
+      // snap-down: stay in contact when walking downhill so crests don't launch you
+      const vUp = this.vel.dot(_pUp);
+      if (vUp <= 0.5) {
+        this.h = g;
+        if (vUp < 0) this.vel.addScaledVector(_pUp, -vUp);
+        this.grounded = true;
+      }
+    }
+
+    // ── slopes: the hillsides sweeping up to the glass are climbable near the
+    //    valley floor and not near the top. Past the limit you slide back down
+    //    instead of strolling up a 60° bank. ──
+    // Only on bare ground: standing on a bridge deck or a station platform, the
+    // terrain underneath may be a steep bank, but the deck is flat.
+    const onTerrain = Math.abs(this.h - terrainH(this.theta, this.lat)) < 0.3;
+    if (this.grounded && !zeroG && onTerrain) {
+      const slope = terrainSlope(this.theta, this.lat);
+      if (slope > SLOPE_WALK) {
+        const t = Math.min(1, (slope - SLOPE_WALK) / (SLOPE_MAX - SLOPE_WALK));
+        // downhill direction in (arc, lat) from the terrain gradient
+        const e = 1.0;
+        const dS = (groundH(this.theta + e / RF, this.lat, this.h) - groundH(this.theta - e / RF, this.lat, this.h)) / (2 * e);
+        const dL = (groundH(this.theta, this.lat + e, this.h) - groundH(this.theta, this.lat - e, this.h)) / (2 * e);
+        const len = Math.hypot(dS, dL);
+        if (len > 1e-4) {
+          tangentAt(this.theta, _pTan);
+          _tmp.copy(_pTan).multiplyScalar(-dS / len);
+          _tmp.y += -dL / len;
+          this.vel.addScaledVector(_tmp, G_FULL * gravityScale * t * 0.55 * dt);
+        }
+      }
+    }
+
+    // ── water: wade, then swim ──
+    // waterDepth() is the modelled surface minus the modelled bed, so this
+    // agrees exactly with the water you can see.
+    this.wadeDepth = 0;
+    this.swimming = false;
+    if (!zeroG && this.h < WATER_H) {          // ...and not up on a bridge deck
+      const depth = waterDepth(this.theta, this.lat);
+      if (depth > 0.05) {
+        this.wadeDepth = depth;
+        if (depth > SWIM_DEPTH) {
+          // float with your head out: hold the body just under the surface
+          this.swimming = true;
+          this.grounded = false;
+          const target = WATER_H - 0.95;
+          const vUp = this.vel.dot(_pUp);
+          this.h += (target - this.h) * Math.min(1, 5 * dt);
+          this.vel.addScaledVector(_pUp, -vUp * Math.min(1, 6 * dt));
+          this.vel.multiplyScalar(Math.max(0, 1 - 2.2 * dt));   // drag
+          if (this.key('Space') && !this.suppressSpace) this.vel.addScaledVector(_pUp, 3.5 * dt);
+        }
+      }
     }
 
     // ── hull cross-section constraint (walls + glass ceiling) ──
@@ -182,6 +273,8 @@ class Player {
   teleport(thetaDeg, lat = 0, h = 0, yaw = 0) {
     this.theta = thetaDeg * Math.PI / 180;
     this.lat = lat; this.h = h; this.yaw = yaw; this.pitch = 0;
+    const g = groundH(this.theta, this.lat, this.h);   // never below the ground
+    if (this.h < g) this.h = g;
     this.vel.set(0, 0, 0);
     torusPosition(this.theta, this.lat, this.h, this.pos);
   }

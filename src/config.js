@@ -10,6 +10,31 @@ const RF   = 940;                   // cylindrical radius of the floor
 const RMAJ = RF - CHORD_DROP;       // cylindrical radius of tube center
 const CIRCUMFERENCE = 2 * Math.PI * RF;   // ≈ 5.9 km of walkable ring
 
+// The ground does not stop at the floor chord: past |lat| = HALF_W it curves
+// UP along the tube wall itself, so the green hillsides literally become the
+// window frames (exactly as in the Don Davis painting). FLOOR_LAT is where the
+// terrain hands over to the glazed hull; the terrain's outermost ring of
+// vertices sits precisely on the tube there, so there is no seam.
+const FLOOR_LAT = 63;
+const HULL_H_AT = (lat) => CHORD_DROP - Math.sqrt(Math.max(0, RT * RT - lat * lat));
+const FLOOR_EDGE_H = HULL_H_AT(FLOOR_LAT);      // ≈ 12.79 m
+
+// Outermost lat any building may occupy. Well inside FLOOR_LAT so structures
+// stay on the near-flat floor instead of climbing the up-curving hull wall (or,
+// past FLOOR_LAT, ending up outside the ring altogether).
+const BUILD_LAT = 46;
+
+// Ring road cross-section (meters)
+const ROAD_HALF   = 4.4;            // carriageway half-width
+const ROAD_SHLDR  = 1.7;            // gravel shoulder beyond the curb
+const ROAD_CROWN  = 0.09;           // camber: centerline rise over the gutter
+const CURB_H      = 0.13;
+
+// Water plane. Constant around the ring — the channel bed is carved to meet it,
+// so the shoreline is exactly where the terrain crosses WATER_H.
+const WATER_H     = -0.55;
+const RIVER_DEPTH = 3.2;            // channel bed below WATER_H at the thalweg
+
 // Spin / gravity
 const FULL_SPIN = 2 * Math.PI / 60;  // 1 rpm — classic Stanford torus
 const G_FULL = 9.2;                  // m/s² at the floor when at full spin

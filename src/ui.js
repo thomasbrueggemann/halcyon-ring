@@ -138,6 +138,20 @@ class UI {
       ctx.arc(cx + R * Math.sin(a), cy - R * Math.cos(a), 4, 0, Math.PI * 2);
       ctx.fill();
     }
+    // monorail stations (small cyan diamonds)
+    if (typeof STATIONS !== 'undefined') {
+      ctx.fillStyle = '#4fd0e0';
+      for (const st of STATIONS) {
+        const a = st.theta;
+        const sx = cx + R * Math.sin(a), sy = cy - R * Math.cos(a);
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillRect(-3, -3, 6, 6);
+        ctx.restore();
+      }
+    }
+
     // player
     const pa = player.theta;
     const px = cx + R * Math.sin(pa), py = cy - R * Math.cos(pa);

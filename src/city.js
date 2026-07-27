@@ -2,6 +2,13 @@
 
 const _cityM = new THREE.Matrix4();
 
+// Ground-aware placement: raise h by the terrain/patch height at (theta, lat) so
+// nothing floats or sinks on the rolling floor. Set-pieces sit on flat spots so
+// groundH there is 0 and their coordinates are unchanged.
+function gm(theta, lat, h, yaw = 0, scale = 1, target) {
+  return placementMatrix(theta, lat, h + groundH(theta, lat, Infinity), yaw, scale, target);
+}
+
 // Iterate theta positions (radians) along an arc given in degrees.
 function* arcSteps(fromDeg, toDeg, stepMeters) {
   let a = fromDeg, b = toDeg;
@@ -41,10 +48,47 @@ function gableRoofGeometry(latDepth, arcWidth, roofH, wallH, chimney = false) {
   return geo;
 }
 
+// A round paved area draped over the ground. sweepProfile carries a fixed
+// profile around the ring, so paving built that way sits at one absolute
+// height — which buried the plaza under its own levelled pad once set-piece
+// pads stopped being pinned to h = 0. Sampling groundH per vertex keeps paving
+// on the ground wherever the pad settles. Discs rather than rectangles
+// because a set-piece pad is only level inside its own radius: a square patch
+// puts its corners out in the feathered slope, where the paving and the terrain
+// interpenetrate and tear.
+function drapedDisc(cTheta, cLat, radius, rings = 10, segs = 40, lift = 0.06) {
+  const pos = [], uv = [], idx = [];
+  const p = new THREE.Vector3();
+  for (let r = 0; r <= rings; r++) {
+    const rad = radius * (r / rings);
+    for (let a = 0; a < segs; a++) {
+      const ang = (a / segs) * Math.PI * 2;
+      const ds = Math.cos(ang) * rad, dl = Math.sin(ang) * rad;
+      const theta = cTheta + ds / RF, lat = cLat + dl;
+      torusPosition(theta, lat, groundH(theta, lat, Infinity) + lift, p);
+      pos.push(p.x, p.y, p.z);
+      uv.push((ds + radius) / 6, (dl + radius) / 6);
+    }
+  }
+  for (let r = 0; r < rings; r++) {
+    for (let a = 0; a < segs; a++) {
+      const a0 = r * segs + a, a1 = r * segs + (a + 1) % segs;
+      const b0 = a0 + segs, b1 = a1 + segs;
+      idx.push(a0, b0, a1, a1, b0, b1);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function instancedFrom(geo, mat, placements, { shadow = true } = {}) {
   const mesh = new THREE.InstancedMesh(geo, mat, placements.length);
   placements.forEach((pl, i) => {
-    placementMatrix(pl.theta, pl.lat, pl.h ?? 0, pl.yaw ?? 0, pl.scale ?? 1, _cityM);
+    gm(pl.theta, pl.lat, pl.h ?? 0, pl.yaw ?? 0, pl.scale ?? 1, _cityM);
     mesh.setMatrixAt(i, _cityM);
     if (pl.tint) mesh.setColorAt(i, pl.tint);
   });
@@ -59,46 +103,177 @@ function buildCity(scene, textures, colliders, rng) {
   scene.add(city);
   const stations = {};
 
-  // ════ Houses ════
+  // ════ Houses — dense, organic, Don-Davis-painting settlement ════
+  // Nothing grid-like: homes cluster along the winding road and the LANES
+  // footpath network, facing the way they front, at irregular setbacks, in
+  // courtyard clusters ringing small plazas, plus lone hillside cottages.
   const archetypes = [
     { latD: 8, arcW: 10, wallH: 3.3, roofH: 2.3, wall: textures.wallA, wallE: textures.wallAE, roof: textures.roof },
     { latD: 9, arcW: 9,  wallH: 6.4, roofH: 1.9, wall: textures.wallB, wallE: textures.wallBE, roof: textures.roofSlate },
     { latD: 8, arcW: 12, wallH: 3.9, roofH: 2.7, wall: textures.wallC, wallE: textures.wallCE, roof: textures.roof },
+    { latD: 6, arcW: 7,  wallH: 2.9, roofH: 2.0, wall: textures.wallA, wallE: textures.wallAE, roof: textures.roofSlate }, // cottage
   ];
   const housePlacements = archetypes.map(() => []);
-  const tintPool = [0xffffff, 0xf2e8da, 0xe8eef2, 0xf5e9dc, 0xeae2f0].map(c => new THREE.Color(c));
-
+  const tintPool = [0xffffff, 0xf2e8da, 0xe8eef2, 0xf5e9dc, 0xeae2f0, 0xf0ded0, 0xdfe6ea].map(c => new THREE.Color(c));
   const hedgePlacements = [];
-  const placeHouse = (theta, side, latBase) => {
-    const a = Math.floor(rng() * archetypes.length);
+  const plazaDiscs = [];   // small courtyard plaza patches (instanced)
+
+  // A footprint centered at (theta, lat) with rotated half-extents (hArc, hLat)
+  // intrudes on a station platform if its bulk reaches the −lat platform band
+  // ([stationLat−7, stationLat+4]) within ±(16 + its own arc reach) of the
+  // station theta. Platforms sit at stationLat−2.9, are 24 m long with a ramp
+  // beyond — keep that whole area clear of building colliders AND geometry.
+  const nearStationZone = (theta, lat, hArc, hLat) => {
+    for (let i = 0; i < STATIONS.length; i++) {
+      const st = STATIONS[i];
+      // The platform sits +lat of the guideway and its walk-up ramp runs ~35 m
+      // further ALONG the ring off the far end, so the reserve is a long thin
+      // corridor, not a box around the station theta.
+      const d = arcDelta(st.theta, theta);          // +ve = ahead of the station
+      const inPlatform = Math.abs(d) < 18 + hArc && lat > st.lat - 5 - hLat && lat < st.lat + 10 + hLat;
+      const inRamp = d > 8 - hArc && d < 56 + hArc && lat > st.lat - 1 - hLat && lat < st.lat + 8 + hLat;
+      if (inPlatform || inRamp) return true;
+    }
+    return false;
+  };
+  // Axis-aligned (s, lat) half-extents of a yaw-rotated box footprint whose
+  // local +Z spans `arcW` (arc dir) and local +X spans `latD` (lat dir).
+  const rotAABB = (arcW, latD, yaw, pad) => {
+    const c = Math.abs(Math.cos(yaw)), s = Math.abs(Math.sin(yaw));
+    return {
+      hArc: c * (arcW / 2) + s * (latD / 2) + pad,
+      hLat: s * (arcW / 2) + c * (latD / 2) + pad,
+    };
+  };
+  // Is (theta, lat) a legal home site? Off the road, out of the river, clear of
+  // station platforms, and not overlapping an existing obstacle.
+  const houseSiteOK = (theta, lat, half, hArc, hLat) => {
+    if (Math.abs(lat) + hLat > BUILD_LAT) return false;
+    // Measured from the FOOTPRINT, not the centre: a 12 m-wide house whose
+    // centre clears the road by 7.5 m still overhangs the carriageway by 5 m.
+    if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + 1.5 + hLat) return false;
+    if (Math.abs(lat - riverLat(theta)) < riverHalf(theta) + 3 + hLat) return false;
+    if (nearStationZone(theta, lat, hArc, hLat)) return false;
+    return !colliders.resolve(theta * RF, lat, 1.2, half);
+  };
+  // Place one house at an explicit position + facing. Returns success.
+  const placeHouse = (theta, lat, faceYaw, prefer = -1) => {
+    const a = prefer >= 0 ? prefer : Math.floor(rng() * 3);   // 0..2 for streets
     const arch = archetypes[a];
-    const lat = side * latBase;
-    const yaw = (side > 0 ? Math.PI : 0) + (rng() - 0.5) * 0.1;
-    housePlacements[a].push({ theta, lat, yaw, tint: tintPool[Math.floor(rng() * tintPool.length)] });
-    colliders.addBox(theta, lat, arch.arcW / 2 + 0.4, arch.latD / 2 + 0.4, arch.wallH + arch.roofH);
-    // garden hedges flanking the front door
-    if (rng() < 0.75) {
-      const front = lat - side * (arch.latD / 2 + 1.1);
-      for (const off of [-arch.arcW * 0.32, arch.arcW * 0.32]) {
-        hedgePlacements.push({
-          theta: theta + off / RF, lat: front, yaw: (rng() - 0.5) * 0.2,
-          scale: 0.8 + rng() * 0.5,
-        });
+    const scale = 0.88 + rng() * 0.26;
+    const arcW = arch.arcW * scale, latD = arch.latD * scale;
+    const half = Math.max(arcW, latD) / 2 + 0.5;              // circle for the overlap check
+    const { hArc, hLat } = rotAABB(arcW, latD, faceYaw, 0.4); // rectangle for registration
+    if (!houseSiteOK(theta, lat, half, hArc, hLat)) return false;
+    housePlacements[a].push({
+      theta, lat, yaw: faceYaw + (rng() - 0.5) * 0.14, scale,
+      tint: tintPool[Math.floor(rng() * tintPool.length)],
+    });
+    colliders.addBox(theta, lat, hArc, hLat, arch.wallH + arch.roofH);
+    // garden hedges flanking the street-facing wall
+    if (rng() < 0.6) {
+      const c = Math.cos(faceYaw), s = Math.sin(faceYaw);
+      const fwd = arch.latD / 2 + 1.0;           // step out the front
+      for (const off of [-arch.arcW * 0.34, arch.arcW * 0.34]) {
+        const ht = theta + (-s * fwd + c * off) / RF;
+        const hl = lat + (c * fwd + s * off);
+        hedgePlacements.push({ theta: ht, lat: hl, yaw: faceYaw + (rng() - 0.5) * 0.2, scale: 0.8 + rng() * 0.5 });
       }
     }
+    return true;
   };
 
+  // ── Frontage along the winding ring road (residential belts) ──
   for (const d of DISTRICTS.filter(d => d.kind === 'houses')) {
-    for (const theta of arcSteps(d.from, d.to, 17)) {
+    for (const theta of arcSteps(d.from, d.to, 9)) {
+      const ry = roadYawAt(theta);
       for (const side of [-1, 1]) {
-        if (rng() < 0.12) continue;
-        placeHouse(theta, side, 20 + rng() * 14);
-        // second row further from the road
-        if (rng() < 0.55) placeHouse(theta + (8 + rng() * 5) / RF, side, 38 + rng() * 6);
+        if (rng() < 0.18) continue;
+        const base = side > 0 ? Math.PI : 0;
+        const set1 = 9 + rng() * 6;                       // irregular setback 9..15
+        placeHouse(theta + (rng() - 0.5) * 4 / RF, side * set1, base + ry);
+        if (rng() < 0.62) placeHouse(theta + (6 + rng() * 6) / RF, side * (22 + rng() * 8), base + ry);
+        if (rng() < 0.35) placeHouse(theta + (rng() - 0.5) * 8 / RF, side * (34 + rng() * 8), base + ry);
       }
     }
   }
+
+  // ── Homes lining the winding LANES network ──
+  const laneHouseCfg = {
+    houses: { step: 7.5, prob: 0.82, both: true },
+    park:   { step: 15,  prob: 0.34, both: false },
+    orchard:{ step: 15,  prob: 0.32, both: false },
+    water:  { step: 16,  prob: 0.28, both: false },
+    plaza:  { step: 12,  prob: 0.30, both: true },
+    science:{ step: 13,  prob: 0.22, both: false },
+    market: { step: 14,  prob: 0.20, both: false },
+    farm:   { step: 18,  prob: 0.16, both: false },
+  };
+  for (const lane of LANES) {
+    const rootDeg = ((laneSample(lane, 0.5).theta / DEG) % 360 + 360) % 360;
+    const cfg = laneHouseCfg[districtAt(rootDeg).kind];
+    if (!cfg) continue;
+    // walk the lane by arc length, dropping houses to either side
+    const N = 48;
+    let acc = 999, prev = null;
+    for (let k = 0; k <= N; k++) {
+      const q = laneSample(lane, 0.05 + 0.9 * (k / N));
+      if (prev) acc += Math.hypot(arcDelta(prev.theta, q.theta), q.lat - prev.lat);
+      prev = q;
+      if (acc < cfg.step) continue;
+      acc = 0;
+      const sides = cfg.both ? [-1, 1] : [rng() < 0.5 ? -1 : 1];
+      for (const side of sides) {
+        if (rng() > cfg.prob) continue;
+        const off = 4.5 + rng() * 4.5;                    // setback 4.5..9 from lane
+        const c = Math.cos(q.yaw), s = Math.sin(q.yaw);
+        const theta = q.theta + (-s * off * side) / RF;
+        const lat = q.lat + (c * off * side);
+        const base = side > 0 ? Math.PI : 0;
+        placeHouse(theta, lat, base + q.yaw);
+      }
+    }
+  }
+
+  // ── Courtyard clusters: 3–6 homes ringing a small plaza patch ──
+  for (const d of DISTRICTS.filter(d => ['houses', 'plaza'].includes(d.kind))) {
+    const nClusters = d.kind === 'houses' ? 3 : 1;
+    for (let ci = 0; ci < nClusters; ci++) {
+      let from = d.from, to = d.to; if (to <= from) to += 360;
+      const cTheta = ((from + (0.2 + 0.6 * rng()) * (to - from)) % 360) * DEG;
+      const side = rng() < 0.5 ? -1 : 1;
+      const cLat = side * (26 + rng() * 12);
+      if (Math.abs(cLat) > 44) continue;
+      if (Math.abs(cLat - riverLat(cTheta)) < riverHalf(cTheta) + 6) continue;
+      const cr = 7 + rng() * 3;
+      const n = 3 + Math.floor(rng() * 4);
+      let placed = 0;
+      for (let i = 0; i < n; i++) {
+        const ang = (i / n) * Math.PI * 2 + rng() * 0.3;
+        const ht = cTheta + (Math.cos(ang) * cr) / RF;
+        const hl = cLat + Math.sin(ang) * cr;
+        // face inward toward the courtyard centre
+        if (placeHouse(ht, hl, Math.atan2(-Math.cos(ang), -Math.sin(ang)))) placed++;
+      }
+      if (placed >= 2) plazaDiscs.push({ theta: cTheta, lat: cLat, scale: cr * 0.6 });
+    }
+  }
+
+  // ── Lone hillside cottages on the outer knolls ──
+  for (const d of DISTRICTS.filter(d => ['houses', 'park', 'orchard'].includes(d.kind))) {
+    for (let i = 0; i < 6; i++) {
+      let from = d.from, to = d.to; if (to <= from) to += 360;
+      const theta = ((from + rng() * (to - from)) % 360) * DEG;
+      const side = rng() < 0.5 ? -1 : 1;
+      const lat = side * (32 + rng() * 12);
+      placeHouse(theta, lat, rng() * Math.PI * 2, 3);   // cottage archetype
+    }
+  }
+
+  // Build house wall + foundation-skirt + roof instanced meshes.
+  const foundMat = new THREE.MeshStandardMaterial({ color: 0x5c554d, roughness: 0.95 });
   archetypes.forEach((arch, i) => {
+    if (!housePlacements[i].length) return;
     const wallGeo = new THREE.BoxGeometry(arch.latD, arch.wallH, arch.arcW);
     wallGeo.translate(0, arch.wallH / 2, 0);
     const wallMat = new THREE.MeshStandardMaterial({
@@ -106,6 +281,11 @@ function buildCity(scene, textures, colliders, rng) {
       emissiveMap: arch.wallE, emissive: 0xffffff, emissiveIntensity: 0.55,
     });
     city.add(instancedFrom(wallGeo, wallMat, housePlacements[i]));
+    // foundation skirt: fill the 1.8 m below the floor so slopes never show
+    // floating corners.
+    const foundGeo = new THREE.BoxGeometry(arch.latD + 0.3, 1.9, arch.arcW + 0.3);
+    foundGeo.translate(0, -0.85, 0);
+    city.add(instancedFrom(foundGeo, foundMat, housePlacements[i], { shadow: false }));
     const roofGeo = gableRoofGeometry(arch.latD, arch.arcW, arch.roofH, arch.wallH, true);
     const roofMat = new THREE.MeshStandardMaterial({ map: arch.roof, roughness: 0.85 });
     city.add(instancedFrom(roofGeo, roofMat, housePlacements[i]));
@@ -117,16 +297,35 @@ function buildCity(scene, textures, colliders, rng) {
     const hc = new THREE.Color();
     const hedges = instancedFrom(hedgeGeo, hedgeMat, hedgePlacements.map(p => ({
       ...p, tint: hc.setHSL(0.27 + rng() * 0.06, 0.5, 0.24 + rng() * 0.1).clone(),
-    })));
+    })), { shadow: false });
     city.add(hedges);
+  }
+  // Courtyard plaza patches (flat discs of plaza texture).
+  if (plazaDiscs.length) {
+    const discGeo = new THREE.CircleGeometry(1, 20);
+    discGeo.rotateX(-Math.PI / 2);
+    const discMat = new THREE.MeshStandardMaterial({ map: textures.plaza, roughness: 0.9, side: THREE.DoubleSide });
+    const disc = new THREE.InstancedMesh(discGeo, discMat, plazaDiscs.length);
+    plazaDiscs.forEach((p, i) => { disc.setMatrixAt(i, gm(p.theta, p.lat, 0.05, 0, p.scale, _cityM)); });
+    disc.receiveShadow = true;
+    city.add(disc);
   }
 
   // ════ Street lights ════
   const lightPlacements = [];
   let flip = 1;
-  for (const theta of arcSteps(0, 360, 23)) {
+  for (const theta of arcSteps(0, 360, 18)) {
     flip = -flip;
-    lightPlacements.push({ theta, lat: flip * 7 });
+    lightPlacements.push({ theta, lat: roadLat(theta) + flip * 6.5 });   // follow the winding road
+  }
+  // scatter a few short posts along major lanes for lit footpaths
+  for (const lane of LANES) {
+    if (rng() < 0.45) continue;
+    for (const t of [0.35, 0.7]) {
+      const q = laneSample(lane, t);
+      const c = Math.cos(q.yaw), s = Math.sin(q.yaw), off = 2.2;
+      lightPlacements.push({ theta: q.theta + (-s * off) / RF, lat: q.lat + c * off, lane: true });
+    }
   }
   const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 5, 8);
   poleGeo.translate(0, 2.5, 0);
@@ -142,14 +341,13 @@ function buildCity(scene, textures, colliders, rng) {
   // ════ Meridian Plaza (spawn) — centered at 6°, clear of the 0° spoke ════
   {
     const PLAZA = 6 * DEG;
-    const plazaPatch = [];
-    for (let i = 0; i <= 8; i++) plazaPatch.push([-40 + 80 * (i / 8), 0.055]);
     const plaza = new THREE.Mesh(
-      sweepProfile(plazaPatch, {
-        uScale: 1 / 6, vScale: 1 / 6,
-        thetaFrom: PLAZA - 45 / RF, thetaTo: PLAZA + 45 / RF, segs: 20,
-      }),
-      new THREE.MeshStandardMaterial({ map: textures.plaza, roughness: 0.9, side: THREE.DoubleSide })
+      drapedDisc(PLAZA, 0, 24, 12, 56),
+      new THREE.MeshStandardMaterial({
+        map: textures.plaza, normalMap: textures.plazaN, roughnessMap: textures.plazaR,
+        roughness: 0.9, metalness: 0.02, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+      })
     );
     plaza.receiveShadow = true;
     city.add(plaza);
@@ -160,20 +358,20 @@ function buildCity(scene, textures, colliders, rng) {
       new THREE.MeshStandardMaterial({ color: 0x9a938a, roughness: 0.8 })
     );
     basin.geometry.rotateX(Math.PI / 2);
-    basin.applyMatrix4(placementMatrix(PLAZA, 0, 0.5, 0, 1));
+    basin.applyMatrix4(gm(PLAZA, 0, 0.5, 0, 1));
     basin.castShadow = true;
     city.add(basin);
     const pool = new THREE.Mesh(
       new THREE.CylinderGeometry(4.1, 4.1, 0.35, 24),
       new THREE.MeshStandardMaterial({ map: textures.water, roughness: 0.15, transparent: true, opacity: 0.9 })
     );
-    pool.applyMatrix4(placementMatrix(PLAZA, 0, 0.45, 0, 1));
+    pool.applyMatrix4(gm(PLAZA, 0, 0.45, 0, 1));
     city.add(pool);
     const jet = new THREE.Mesh(
       new THREE.ConeGeometry(0.5, 3.2, 12),
       new THREE.MeshStandardMaterial({ color: 0xcfe8ee, transparent: true, opacity: 0.55, roughness: 0.1 })
     );
-    jet.applyMatrix4(placementMatrix(PLAZA, 0, 2.0, 0, 1));
+    jet.applyMatrix4(gm(PLAZA, 0, 2.0, 0, 1));
     city.add(jet);
     colliders.addCylinder(PLAZA, 0, 5.0, 2.5);
     stations.fountain = { theta: PLAZA, lat: 0 };
@@ -186,7 +384,7 @@ function buildCity(scene, textures, colliders, rng) {
         emissiveMap: textures.wallBE, emissive: 0xffffff, emissiveIntensity: 0.55,
       })
     );
-    hall.applyMatrix4(placementMatrix(8.2 * DEG, -34, 4.5, 0, 1));
+    hall.applyMatrix4(gm(8.2 * DEG, -34, 4.5, 0, 1));
     hall.castShadow = true; hall.receiveShadow = true;
     city.add(hall);
     colliders.addBox(8.2 * DEG, -34, 13.5, 7.5, 9);
@@ -212,9 +410,74 @@ function buildCity(scene, textures, colliders, rng) {
       shrub.position.y = 1.05;
       shrub.scale.y = 0.85;
       planter.add(pot, shrub);
-      planter.applyMatrix4(placementMatrix(pTheta, pLat, 0.05, 0, 1));
+      planter.applyMatrix4(gm(pTheta, pLat, 0.05, 0, 1));
       planter.traverse(o => { o.castShadow = true; });
       city.add(planter);
+    }
+
+    // ── Foreground homage: a small recreation court (Don Davis painting) ──
+    // Sits on the flat +lat side of the plaza, clear of the fountain (6°,0) and
+    // the spawn point (4.3°,−13). Purely decorative.
+    {
+      const RC = 5 * DEG, RL = 18;   // court centre
+      // plaza apron (flat textured slab)
+      const apron = new THREE.Mesh(
+        sweepProfile([[RL - 11, 0.05], [RL + 11, 0.05]], {
+          uScale: 1 / 5, vScale: 1 / 5, thetaFrom: RC - 13 / RF, thetaTo: RC + 13 / RF, segs: 10,
+        }),
+        new THREE.MeshStandardMaterial({ map: textures.plaza, roughness: 0.9, side: THREE.DoubleSide })
+      );
+      apron.receiveShadow = true;
+      city.add(apron);   // sweepProfile bakes world coords — no gm
+      // lawn strip beside the apron
+      const lawn = new THREE.Mesh(
+        new THREE.PlaneGeometry(10, 9),
+        new THREE.MeshStandardMaterial({ color: 0x6f9a52, roughness: 1, side: THREE.DoubleSide })
+      );
+      lawn.geometry.rotateX(-Math.PI / 2);
+      lawn.applyMatrix4(gm(RC + 8 / RF, RL + 9, 0.04, 0, 1));
+      lawn.receiveShadow = true;
+      city.add(lawn);
+      // sunken swimming pool
+      const poolRim = new THREE.Mesh(
+        new THREE.BoxGeometry(6.4, 0.5, 10.4),
+        new THREE.MeshStandardMaterial({ color: 0xd8dce0, roughness: 0.8 })
+      );
+      poolRim.applyMatrix4(gm(RC, RL, 0.2, 0, 1));
+      poolRim.castShadow = true; city.add(poolRim);
+      const poolWater = new THREE.Mesh(
+        new THREE.BoxGeometry(5.6, 0.1, 9.6),
+        new THREE.MeshStandardMaterial({ map: textures.water, roughness: 0.12, transparent: true, opacity: 0.9 })
+      );
+      poolWater.applyMatrix4(gm(RC, RL, 0.28, 0, 1));
+      city.add(poolWater);
+      // low rim colliders (short — the player steps over, never trapped)
+      colliders.addBox(RC, RL - 5.3, 3.4, 0.4, 0.45);
+      colliders.addBox(RC, RL + 5.3, 3.4, 0.4, 0.45);
+      // 3 pergolas: flat canopy on four thin posts
+      const postMat = new THREE.MeshStandardMaterial({ color: 0xb6a184, roughness: 0.85 });
+      const canopyMat = new THREE.MeshStandardMaterial({ color: 0x8a6f4c, roughness: 0.9 });
+      for (let p = 0; p < 3; p++) {
+        const pt = RC + ((p - 1) * 7) / RF, pl = RL - 9;
+        const pergola = new THREE.Group();
+        for (const [dx, dz] of [[-1.6, -1.6], [1.6, -1.6], [1.6, 1.6], [-1.6, 1.6]]) {
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 2.4, 6), postMat);
+          post.position.set(dx, 1.2, dz); pergola.add(post);
+        }
+        const canopy = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.14, 4.0), canopyMat);
+        canopy.position.y = 2.45; pergola.add(canopy);
+        pergola.applyMatrix4(gm(pt, pl, 0, 0, 1));
+        pergola.traverse(o => { o.castShadow = true; });
+        city.add(pergola);
+      }
+      // a few loungers by the pool
+      const loungerMat = new THREE.MeshStandardMaterial({ color: 0xdfe4e8, roughness: 0.7 });
+      for (let i = 0; i < 4; i++) {
+        const lounger = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.18, 1.9), loungerMat);
+        const lt = RC + ((i - 1.5) * 2.2) / RF;
+        lounger.applyMatrix4(gm(lt, RL + 4.6, 0.35, (i % 2) * 0.1, 1));
+        lounger.castShadow = true; city.add(lounger);
+      }
     }
   }
 
@@ -224,7 +487,7 @@ function buildCity(scene, textures, colliders, rng) {
     const wallMat = new THREE.MeshStandardMaterial({ map: textures.hull.clone(), roughness: 0.5, metalness: 0.4 });
     wallMat.map.repeat.set(3, 1.5);
     const panel = new THREE.Mesh(new THREE.BoxGeometry(0.7, 4.2, 10), wallMat);
-    panel.applyMatrix4(placementMatrix(thetaP, -18, 2.1, 0, 1));
+    panel.applyMatrix4(gm(thetaP, -18, 2.1, 0, 1));
     panel.castShadow = true;
     city.add(panel);
     colliders.addBox(thetaP, -18, 5.2, 0.6, 4.2);
@@ -243,7 +506,7 @@ function buildCity(scene, textures, colliders, rng) {
       stem.position.z = 0.28;
       wheel.position.z = 0.55;
       grp.add(stem, wheel);
-      grp.applyMatrix4(placementMatrix(vTheta, -17.55, 1.45, -Math.PI / 2, 1));
+      grp.applyMatrix4(gm(vTheta, -17.55, 1.45, -Math.PI / 2, 1));
       city.add(grp);
       stations.valves.push({ mesh: grp, wheel, theta: vTheta, lat: -17.2, h: 1.45, index: i });
 
@@ -251,7 +514,7 @@ function buildCity(scene, textures, colliders, rng) {
         new THREE.SphereGeometry(0.16, 10, 8),
         new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0x000000, emissiveIntensity: 2.4 })
       );
-      lamp.applyMatrix4(placementMatrix(vTheta, -17.6, 3.1, 0, 1));
+      lamp.applyMatrix4(gm(vTheta, -17.6, 3.1, 0, 1));
       city.add(lamp);
       stations.valveLamps.push(lamp);
     }
@@ -263,40 +526,72 @@ function buildCity(scene, textures, colliders, rng) {
       const t = (44 + i * 3) * DEG;
       const tank = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 2.6, 9, 18), tankMat);
       tank.geometry.rotateX(Math.PI / 2);
-      tank.applyMatrix4(placementMatrix(t, -36, 2.6, 0, 1));
+      tank.applyMatrix4(gm(t, -36, 2.6, 0, 1));
       tank.castShadow = true;
       city.add(tank);
       colliders.addCylinder(t, -36, 3.2, 5.5);
     }
     const pipeMat = new THREE.MeshStandardMaterial({ color: 0x8a6f2f, roughness: 0.5, metalness: 0.8 });
+    const trestleMat = new THREE.MeshStandardMaterial({ color: 0x6e737a, roughness: 0.6, metalness: 0.6 });
     for (let i = 0; i < 2; i++) {
+      const t = (45.5 + i) * DEG;
       const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 22, 10), pipeMat);
-      pipe.rotation.z = Math.PI / 2;
+      pipe.rotation.z = Math.PI / 2;                 // axis runs along lat
       const g = new THREE.Group(); g.add(pipe);
-      g.applyMatrix4(placementMatrix((45.5 + i) * DEG, -27, 0.5 + i * 0.8, 0, 1));
+      // carried 5 m up so it spans the carriageway instead of crossing it
+      g.applyMatrix4(placementMatrix(t, -27, roadH(t) + 5.0 + i * 0.85, 0, 1));
       city.add(g);
+      for (const dl of [-10.5, 10.5]) {
+        const base = groundH(t, -27 + dl, Infinity);
+        const hgt = roadH(t) + 5.0 + i * 0.85 - base;
+        if (hgt < 1) continue;
+        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, hgt, 8), trestleMat);
+        leg.applyMatrix4(gm(t, -27 + dl, hgt / 2, 0, 1));
+        leg.castShadow = true;
+        city.add(leg);
+        colliders.addCylinder(t, -27 + dl, 0.45, hgt);
+      }
     }
   }
 
   // ════ Agricultural Belt — greenhouse, barn, silo, fuse hunt ════
   {
-    // crop strips
+    // Crop strips. Two things changed with the valley rebuild: the ground rolls
+    // (so a strip swept flat over ±34 m of arc floats at one end and buries
+    // itself at the other), and the road/river no longer sit at fixed lats (so
+    // fixed bands would be planted in the water). Drape each strip over
+    // groundH, and hang the bands off the road and the guideway instead.
     for (const d of [DISTRICTS.find(x => x.kind === 'farm')]) {
       const cropTints = [0xffffff, 0xd9ecb0, 0xe8d9a0, 0xc9e0c0, 0xf0e6c8];
-      for (let band = 0; band < 4; band++) {
-        const lat0 = [-44, -30, 18, 34][band];
-        for (const theta of arcSteps(d.from + 2, d.to - 2, 80)) {
-          if (rng() < 0.1) continue;
-          const patch = [];
-          for (let i = 0; i <= 3; i++) patch.push([lat0 + 12 * (i / 3), 0.04]);
+      for (const theta of arcSteps(d.from + 2, d.to - 2, 80)) {
+        for (let band = 0; band < 4; band++) {
+          if (rng() < 0.12) continue;
+          const near = band < 2;
+          const lat0 = near
+            ? roadLat(theta) - (11 + band * 14)
+            : railLat(theta) + (5 + (band - 2) * 14);
+          const lat1 = lat0 + (near ? -12 : 12);
+          const lo = Math.min(lat0, lat1), hi = Math.max(lat0, lat1);
+          if (lo < -(FLOOR_LAT - 8) || hi > FLOOR_LAT - 8) continue;
+          // never plant into the water or across the carriageway
+          const rl = riverLat(theta), rh = riverHalf(theta);
+          if (hi > rl - rh - 2 && lo < rl + rh + 2) continue;
+          if (hi > roadLat(theta) - 7 && lo < roadLat(theta) + 7) continue;
+          const pts = [];
+          const mid = (lo + hi) / 2;
+          for (let k = 0; k <= 10; k++) {
+            pts.push({ theta: theta + (-34 + 68 * (k / 10)) / RF, lat: mid });
+          }
           const strip = new THREE.Mesh(
-            sweepProfile(patch, {
-              uScale: 1 / 4, vScale: 1 / 4,
-              thetaFrom: theta - 34 / RF, thetaTo: theta + 34 / RF, segs: 12,
+            buildRibbon(pts, {
+              half: (hi - lo) / 2,
+              hFn: (th, la) => groundH(th, la, Infinity) + 0.05,
+              closed: false, uScale: 0.08, vScale: 3,
             }),
             new THREE.MeshStandardMaterial({
               map: textures.crops, roughness: 1, side: THREE.DoubleSide,
               color: cropTints[Math.floor(rng() * cropTints.length)],
+              polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
             })
           );
           strip.receiveShadow = true;
@@ -313,7 +608,7 @@ function buildCity(scene, textures, colliders, rng) {
     stations.greenhouse = null;
     for (let i = 0; i < 4; i++) {
       const t = (95 + i * 9) * DEG;
-      const lat = i % 2 ? 26 : -24;
+      const lat = i % 2 ? 26 : -40;
       const g = new THREE.Group();
       const base = new THREE.Mesh(new THREE.BoxGeometry(7, 0.4, 14), frameMat);
       base.position.y = 0.2;
@@ -322,7 +617,7 @@ function buildCity(scene, textures, colliders, rng) {
       const ridge = new THREE.Mesh(gableRoofGeometry(6.8, 13.8, 1.4, 0), glassMat);
       ridge.position.y = 3.4;
       g.add(base, glassBox, ridge);
-      g.applyMatrix4(placementMatrix(t, lat, 0, 0, 1));
+      g.applyMatrix4(gm(t, lat, 0, 0, 1));
       city.add(g);
       colliders.addBox(t, lat, 7.2, 3.7, 4.6);
       if (i === 2) stations.greenhouse = { theta: t, lat };
@@ -336,7 +631,7 @@ function buildCity(scene, textures, colliders, rng) {
     const barnRoof = new THREE.Mesh(gableRoofGeometry(10, 16, 3, 5),
       new THREE.MeshStandardMaterial({ map: textures.roof, roughness: 0.85 }));
     barn.add(barnBody, barnRoof);
-    barn.applyMatrix4(placementMatrix(122 * DEG, 34, 0, 0, 1));
+    barn.applyMatrix4(gm(122 * DEG, 34, 0, 0, 1));
     barn.traverse(o => { o.castShadow = true; });
     city.add(barn);
     colliders.addBox(122 * DEG, 34, 8.4, 5.4, 8);
@@ -349,7 +644,7 @@ function buildCity(scene, textures, colliders, rng) {
       new THREE.MeshStandardMaterial({ color: 0x9aa2ab, roughness: 0.4, metalness: 0.6 }));
     siloCap.position.y = 9;
     silo.add(siloBody, siloCap);
-    silo.applyMatrix4(placementMatrix(124.5 * DEG, 40, 0, 0, 1));
+    silo.applyMatrix4(gm(124.5 * DEG, 40, 0, 0, 1));
     silo.traverse(o => { o.castShadow = true; });
     city.add(silo);
     colliders.addCylinder(124.5 * DEG, 40, 2.9, 9);
@@ -372,7 +667,7 @@ function buildCity(scene, textures, colliders, rng) {
       relay.add(slot);
       stations.relaySlots.push(slot);
     }
-    relay.applyMatrix4(placementMatrix(104 * DEG, -9, 0, 0, 1));
+    relay.applyMatrix4(gm(104 * DEG, -9, 0, 0, 1));
     relay.traverse(o => { o.castShadow = true; });
     city.add(relay);
     colliders.addBox(104 * DEG, -9, 1.1, 0.8, 2.2);
@@ -382,7 +677,7 @@ function buildCity(scene, textures, colliders, rng) {
     stations.fuses = [];
     const fuseSpots = [
       { theta: 96 * DEG, lat: 24.5, h: 1.15 },     // on the crate stack
-      { theta: 113.4 * DEG, lat: -19.4, h: 0.35 }, // beside the third greenhouse
+      { theta: 113.4 * DEG, lat: -35.4, h: 0.35 }, // beside the third greenhouse
       { theta: 124.8 * DEG, lat: 36.5, h: 0.4 },   // at the silo
     ];
     for (const spot of fuseSpots) {
@@ -392,7 +687,7 @@ function buildCity(scene, textures, colliders, rng) {
           color: 0x9ff2ff, emissive: 0x35c8e8, emissiveIntensity: 2.2, roughness: 0.3,
         })
       );
-      fuse.applyMatrix4(placementMatrix(spot.theta, spot.lat, spot.h, 0, 1));
+      fuse.applyMatrix4(gm(spot.theta, spot.lat, spot.h, 0, 1));
       city.add(fuse);
       const beacon = new THREE.Mesh(
         new THREE.CylinderGeometry(0.7, 0.7, 70, 10, 1, true),
@@ -401,7 +696,7 @@ function buildCity(scene, textures, colliders, rng) {
           blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false,
         })
       );
-      beacon.applyMatrix4(placementMatrix(spot.theta, spot.lat, 35, 0, 1));
+      beacon.applyMatrix4(gm(spot.theta, spot.lat, 35, 0, 1));
       city.add(beacon);
       stations.fuses.push({ ...spot, mesh: fuse, beacon, taken: false });
     }
@@ -410,7 +705,7 @@ function buildCity(scene, textures, colliders, rng) {
     crateMat.map.repeat.set(1, 1);
     for (const [dx, dz, dy] of [[0, 0, 0.45], [0, 1.1, 0.45], [0, 0.5, 1.0 - 0.55 + 0.45]]) {
       const crate = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), crateMat);
-      crate.applyMatrix4(placementMatrix(96 * DEG + dz / RF, 24.5 + dx, dy, rng(), 1));
+      crate.applyMatrix4(gm(96 * DEG + dz / RF, 24.5 + dx, dy, rng(), 1));
       crate.castShadow = true;
       city.add(crate);
     }
@@ -446,7 +741,7 @@ function buildCity(scene, textures, colliders, rng) {
         goods.position.set((rng() - 0.5) * 1.2, 1.3, (gI - 1) * 0.95);
         stall.add(goods);
       }
-      stall.applyMatrix4(placementMatrix(t, lat, 0, side > 0 ? Math.PI : 0, 1));
+      stall.applyMatrix4(gm(t, lat, 0, side > 0 ? Math.PI : 0, 1));
       stall.traverse(o => { o.castShadow = true; });
       city.add(stall);
       colliders.addBox(t, lat, 1.9, 1.4, 1.4);
@@ -455,23 +750,10 @@ function buildCity(scene, textures, colliders, rng) {
     stations.alignConsole = makeTerminal(city, 180 * DEG + 9 / RF, 8.5, 0.05, 0xffb454, colliders);
   }
 
-  // ════ Reservoir Flats — water + coded water tower ════
+  // ════ Reservoir Flats — coded water tower ════
+  // (The old rectangular reservoir mesh is gone; the river's lake bulge at
+  //  ~240° is the reservoir now — see layout.js riverHalf / world.js.)
   {
-    const patch = [];
-    for (let i = 0; i <= 6; i++) patch.push([16 + 32 * (i / 6), 0.03]);
-    const water = new THREE.Mesh(
-      sweepProfile(patch, {
-        uScale: 1 / 10, vScale: 1 / 10,
-        thetaFrom: 234 * DEG, thetaTo: 252 * DEG, segs: 60,
-      }),
-      new THREE.MeshStandardMaterial({
-        map: textures.water, roughness: 0.12, metalness: 0.1,
-        transparent: true, opacity: 0.92, side: THREE.DoubleSide,
-      })
-    );
-    city.add(water);
-    stations.waterMat = water.material;
-
     // Water tower with the access code painted on the tank
     const towerTheta = 250 * DEG, towerLat = -28;
     const legMat = new THREE.MeshStandardMaterial({ color: 0x8a9098, roughness: 0.5, metalness: 0.6 });
@@ -485,7 +767,7 @@ function buildCity(scene, textures, colliders, rng) {
       new THREE.MeshStandardMaterial({ color: 0xd7dde2, roughness: 0.35, metalness: 0.5 }));
     tank.position.y = 21;
     tower.add(tank);
-    tower.applyMatrix4(placementMatrix(towerTheta, towerLat, 0, 0, 1));
+    tower.applyMatrix4(gm(towerTheta, towerLat, 0, 0, 1));
     tower.traverse(o => { o.castShadow = true; });
     city.add(tower);
     colliders.addBox(towerTheta, towerLat, 4.2, 4.2, 2.2);
@@ -510,7 +792,7 @@ function buildCity(scene, textures, colliders, rng) {
       new THREE.MeshBasicMaterial({ map: signTex })
     );
     // hang the sign on the road-facing side of the tank (normal toward +lat)
-    sign.applyMatrix4(placementMatrix(towerTheta, towerLat + 5.15, 21, -Math.PI / 2, 1));
+    sign.applyMatrix4(gm(towerTheta, towerLat + 5.15, 21, -Math.PI / 2, 1));
     city.add(sign);
   }
 
@@ -529,7 +811,7 @@ function buildCity(scene, textures, colliders, rng) {
     slit.position.set(0, 7.5, 0);
     slit.rotation.x = 0.5;
     obs.add(base, dome, slit);
-    obs.applyMatrix4(placementMatrix(obsTheta, obsLat, 0, 0, 1));
+    obs.applyMatrix4(gm(obsTheta, obsLat, 0, 0, 1));
     obs.traverse(o => { o.castShadow = true; });
     city.add(obs);
     colliders.addCylinder(obsTheta, obsLat, 8.5, 10);
@@ -546,7 +828,7 @@ function buildCity(scene, textures, colliders, rng) {
       const side = i % 2 ? 1 : -1;
       const lat = side * 30;
       const wh = new THREE.Mesh(new THREE.BoxGeometry(14, 8, 20), wallMat);
-      wh.applyMatrix4(placementMatrix(t, lat, 4, 0, 1));
+      wh.applyMatrix4(gm(t, lat, 4, 0, 1));
       wh.castShadow = true; wh.receiveShadow = true;
       city.add(wh);
       colliders.addBox(t, lat, 10.4, 7.4, 8);
@@ -555,11 +837,15 @@ function buildCity(scene, textures, colliders, rng) {
     for (let i = 0; i < 26; i++) {
       const t = (318 + rng() * 28) * DEG;
       const lat = (rng() < 0.5 ? -1 : 1) * (11 + rng() * 10);
+      // containers are scattered at random lats — keep them off the carriageway
+      // and out of the water rather than trusting the range not to overlap
+      if (Math.abs(lat - roadLat(t)) < ROAD_HALF + ROAD_SHLDR + 2.5) continue;
+      if (Math.abs(lat - riverLat(t)) < riverHalf(t) + 3) continue;
       const stackH = rng() < 0.18 ? 3 : rng() < 0.5 ? 2 : 1;
       for (let sIdx = 0; sIdx < stackH; sIdx++) {
         const cont = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.5, 6),
           new THREE.MeshStandardMaterial({ color: contColors[Math.floor(rng() * contColors.length)], roughness: 0.6, metalness: 0.4 }));
-        cont.applyMatrix4(placementMatrix(t, lat, 1.25 + sIdx * 2.5, (rng() - 0.5) * 0.15, 1));
+        cont.applyMatrix4(gm(t, lat, 1.25 + sIdx * 2.5, (rng() - 0.5) * 0.15, 1));
         cont.castShadow = true;
         city.add(cont);
       }
@@ -569,14 +855,13 @@ function buildCity(scene, textures, colliders, rng) {
 
   // ════ Spoke plazas + gyroscope panel on Spoke F (300°) ════
   for (const st of SPOKE_THETAS) {
-    const patch = [];
-    for (let i = 0; i <= 4; i++) patch.push([-14 + 28 * (i / 4), 0.05]);
     const pad = new THREE.Mesh(
-      sweepProfile(patch, {
-        uScale: 1 / 6, vScale: 1 / 6,
-        thetaFrom: st - 14 / RF, thetaTo: st + 14 / RF, segs: 8,
-      }),
-      new THREE.MeshStandardMaterial({ map: textures.plaza, roughness: 0.9, side: THREE.DoubleSide })
+      drapedDisc(st, 0, 14, 6, 36),
+      new THREE.MeshStandardMaterial({
+        map: textures.plaza, normalMap: textures.plazaN,
+        roughness: 0.9, metalness: 0.02, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+      })
     );
     pad.receiveShadow = true;
     city.add(pad);
@@ -596,7 +881,7 @@ function buildCity(scene, textures, colliders, rng) {
     const grp = new THREE.Group();
     grp.add(panel, screen);
     // bolted to the shaft, 17 m up — reachable only when gravity is out
-    grp.applyMatrix4(placementMatrix(gyroTheta, 6.9, 17, Math.PI, 1));
+    grp.applyMatrix4(gm(gyroTheta, 6.9, 17, Math.PI, 1));
     city.add(grp);
     stations.gyroPanel = { theta: gyroTheta, lat: 6.9, h: 17, screen };
 
@@ -605,7 +890,7 @@ function buildCity(scene, textures, colliders, rng) {
       new THREE.TorusGeometry(1.4, 0.08, 8, 24),
       new THREE.MeshBasicMaterial({ color: 0xff5555, transparent: true, opacity: 0.85 })
     );
-    ringMark.applyMatrix4(placementMatrix(gyroTheta, 6.9, 17, Math.PI, 1));
+    ringMark.applyMatrix4(gm(gyroTheta, 6.9, 17, Math.PI, 1));
     city.add(ringMark);
     stations.gyroRing = ringMark;
   }
@@ -629,34 +914,59 @@ function buildCity(scene, textures, colliders, rng) {
 
     const tryBlock = (theta, lat, ti, yaw) => {
       const t = blockTypes[ti];
-      const halfDiag = Math.hypot(t.arcW, t.latD) / 2 + 0.7;
+      const halfDiag = Math.hypot(t.arcW, t.latD) / 2 + 0.7;   // circle for the overlap check only
+      // proper axis-aligned extents of the yaw-rotated footprint (local +Z = arcW
+      // along the arc, local +X = latD across lat).
+      const rc = Math.abs(Math.cos(yaw)), rs = Math.abs(Math.sin(yaw));
+      const hArc = rc * (t.arcW / 2) + rs * (t.latD / 2) + 0.3;
+      const hLat = rs * (t.arcW / 2) + rc * (t.latD / 2) + 0.3;
+      // Blocks are laid out relative to roadLat(theta), which wanders as far as
+      // ∓49 m — so a 42 m offset would otherwise put a tower at |lat| ≈ 90, well
+      // past FLOOR_LAT: outside the hull entirely, hanging in the starfield.
+      // Slide the site back onto the buildable floor band instead of dropping
+      // it, so downtown keeps its density on the narrow side of the road.
+      if (Math.abs(lat) + hLat > BUILD_LAT) {
+        const inward = Math.sign(lat) * (BUILD_LAT - hLat);
+        if (Math.abs(inward) < hLat) return false;   // footprint can't fit at all
+        lat = inward;
+        // A slid site no longer sits at its designed offset from the road, so
+        // the usual road/rail clearance is no longer implied — check it.
+        if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + 1.5 + hLat) return false;
+        if (Math.abs(lat - railLat(theta)) < RAIL_HALF + 2 + hLat) return false;
+      }
+      if (Math.abs(lat - riverLat(theta)) < riverHalf(theta) + 4) return false;
+      if (nearStationZone(theta, lat, hArc, hLat)) return false;   // keep platforms clear
       if (colliders.resolve(theta * RF, lat, 1, halfDiag)) return false;
       blockPlacements[ti].push({
         theta, lat, yaw: yaw + (rng() - 0.5) * 0.04,
         tint: blockTints[Math.floor(rng() * blockTints.length)],
       });
-      colliders.addBox(theta, lat, t.arcW / 2 + 0.3, t.latD / 2 + 0.3, t.h);
+      colliders.addBox(theta, lat, hArc, hLat, t.h);
       return true;
     };
 
+    // Blocks reflow along the winding road: lat is measured relative to
+    // roadLat(theta) and yaw follows roadYawAt so street walls track the curve.
     for (const arc of URBAN_ARCS) {
-      for (const theta of arcSteps(arc.from, arc.to, 18)) {
+      for (const theta of arcSteps(arc.from, arc.to, 14)) {
+        const rl = roadLat(theta), ry = roadYawAt(theta);
         for (const side of [-1, 1]) {
           if (rng() < 0.12) continue;
-          const yaw = side > 0 ? Math.PI : 0;
+          const yaw = (side > 0 ? Math.PI : 0) + ry;
           // keep the plaza square itself open
           const onPlaza = Math.abs(arcDelta(theta, PLAZA_C)) < 55;
-          if (!onPlaza) tryBlock(theta, side * (15.2 + rng() * 1.8), Math.floor(rng() * 3), yaw);
-          if (rng() < 0.75) tryBlock(theta + (5 + rng() * 6) / RF, side * (28.5 + rng() * 4), Math.floor(rng() * 3), yaw);
+          if (!onPlaza) tryBlock(theta, rl + side * (12.5 + rng() * 2.5), Math.floor(rng() * 3), yaw);
+          if (rng() < 0.8) tryBlock(theta + (4 + rng() * 5) / RF, rl + side * (25 + rng() * 5), Math.floor(rng() * 3), yaw);
+          if (rng() < 0.4) tryBlock(theta + (rng() - 0.5) * 8 / RF, rl + side * (37 + rng() * 5), Math.floor(rng() * 3), yaw);
         }
       }
     }
     // corner stores sprinkled through the residential districts
     for (const d of DISTRICTS.filter(x => x.kind === 'houses')) {
-      for (const theta of arcSteps(d.from, d.to, 85)) {
-        if (rng() < 0.35) continue;
+      for (const theta of arcSteps(d.from, d.to, 70)) {
+        if (rng() < 0.3) continue;
         const side = rng() < 0.5 ? -1 : 1;
-        tryBlock(theta, side * 14.2, 2, side > 0 ? Math.PI : 0);
+        tryBlock(theta, roadLat(theta) + side * 13.5, 2, (side > 0 ? Math.PI : 0) + roadYawAt(theta));
       }
     }
 
@@ -698,10 +1008,12 @@ function buildCity(scene, textures, colliders, rng) {
     }
     for (const theta of arcSteps(0, 360, 52)) {
       if (rng() < 0.35) continue;
+      const side = rng() < 0.5 ? -1 : 1;
       benchPlacements.push({
         theta,
-        lat: (rng() < 0.5 ? -1 : 1) * (9.2 + rng() * 1.5),
-        yaw: (rng() < 0.5 ? 0 : Math.PI) + (rng() - 0.5) * 0.2,
+        lat: roadLat(theta) + side * (9.2 + rng() * 1.5),   // roadside
+        // seat faces the road: +Z toward -lat side is -PI/2, add road tangent
+        yaw: (side > 0 ? Math.PI / 2 : -Math.PI / 2) + roadYawAt(theta) + (rng() - 0.5) * 0.15,
       });
     }
     const seat = new THREE.BoxGeometry(0.5, 0.07, 1.75);
@@ -744,7 +1056,7 @@ function makeTerminal(parent, theta, lat, h, screenColor, colliders = null) {
   screen.rotation.x = -0.5;
   g.add(pedestal, head, screen);
   const yaw = lat > 0 ? Math.PI / 2 : -Math.PI / 2;   // face the road at lat 0
-  g.applyMatrix4(placementMatrix(theta, lat, h ?? 0, yaw, 1));
+  g.applyMatrix4(gm(theta, lat, h ?? 0, yaw, 1));
   g.traverse(o => { o.castShadow = true; });
   parent.add(g);
   if (colliders) colliders.addCylinder(theta, lat, 1.1, 2);
