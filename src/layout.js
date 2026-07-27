@@ -979,6 +979,23 @@ function _boreRuns(latFn, minCrown) {
 const ROAD_TUNNELS = _boreRuns(roadLat, 8.0);
 const RAIL_TUNNELS = _boreRuns(railLatStatic, 14.0);
 
+// Under a roof? The ground inside a bore is still ordinary corridor ground —
+// the notch is cut before the vault goes over it — so without this test the
+// splat lays a lawn on the tunnel floor and vegetation plants a pine beside the
+// carriageway, eighty metres inside a mountain. Half-widths match the vault.
+const _BORES = [
+  ...ROAD_TUNNELS.map((r) => ({ r, latFn: roadLat, w: 11.0 })),
+  ...RAIL_TUNNELS.map((r) => ({ r, latFn: railLatStatic, w: 8.0 })),
+];
+function inBore(theta, lat) {
+  for (let i = 0; i < _BORES.length; i++) {
+    const b = _BORES[i];
+    if (Math.abs(arcDelta(theta, b.r.thetaMid)) > b.r.len / 2 + 5) continue;
+    if (Math.abs(lat - b.latFn(theta)) < b.w) return true;
+  }
+  return false;
+}
+
 // ── Hillside tributaries ────────────────────────────────────────────────────
 // Small streams that come down off the −lat hillside, pass under the ring road
 // through a culvert, and join the river. Nine of them, spaced round the ring
@@ -1232,37 +1249,65 @@ function lakePoint(lk, ang, m) {
     lat: lk.lat + Math.sin(ang) * lk.rl * m,
   };
 }
-// How far inside the lake (theta, lat) is: 1 at the middle, 0 at the shore and
-// outside. `grow` inflates both semi-axes by that many metres.
-function _lakeT(lk, theta, lat, grow) {
+// Normalised radius of (theta, lat) in the lake's frame: 0 at the middle, 1 at
+// the rim, more than 1 outside it. Infinity once far enough out to skip.
+// `lk.apron` is where the grading runs out; it is per-lake because it has to
+// scale with the cut. A lake set into ground 5 m above the waterline needs
+// three times the run-out of one in a hollow, or its bank is a quarry face.
+function _lakeU(lk, theta, lat) {
   let ds = theta * RF - lk.s;
   if (ds > CIRCUMFERENCE / 2) ds -= CIRCUMFERENCE;
   if (ds < -CIRCUMFERENCE / 2) ds += CIRCUMFERENCE;
-  const ra = lk.ra + grow, rl = lk.rl + grow;
-  if (ds < -ra * 1.4 || ds > ra * 1.4) return 0;
+  const reach = lk.apron + 0.3;
+  if (ds < -lk.ra * reach || ds > lk.ra * reach) return Infinity;
   const dl = lat - lk.lat;
-  if (dl < -rl * 1.4 || dl > rl * 1.4) return 0;
-  const x = ds / ra, y = dl / rl;
+  if (dl < -lk.rl * reach || dl > lk.rl * reach) return Infinity;
+  const x = ds / lk.ra, y = dl / lk.rl;
   const d = Math.hypot(x, y);
-  if (d < 1e-6) return 1;
-  const r = lakeRim(lk, Math.atan2(y, x));
-  return d >= r ? 0 : 1 - d / r;
+  if (d < 1e-6) return 0;
+  return d / lakeRim(lk, Math.atan2(y, x));
 }
-// The bed a lake wants at `t` metres-in, as an ABSOLUTE height rather than a
-// depth to subtract. That distinction is the whole thing: subtracting a fixed
-// bowl from ground that happens to be sloping gives a crater with the water
-// pooled in one corner of it and forty metres of dry sand up the other side.
-// Blending the ground TOWARD a flat bed puts the shoreline wherever the blend
-// crosses the waterline, which is what a lake does.
-function _lakeBed(lk, t) { return WATER_H - lk.depth * (0.35 + 0.65 * t); }
+// The height a lake wants at normalised radius u, as an ABSOLUTE value rather
+// than a depth to subtract. Two things fall out of writing it this way:
+//
+//   * At u = 1 the target IS the waterline, so the shoreline lands on the rim
+//     by construction. Subtracting a bowl instead put it wherever the bowl
+//     happened to out-dig the local ground — which, on land sitting 2 m proud
+//     of the water, was a small pool at the bottom of a dry sand crater.
+//   * The influence runs out to LAKE_APRON, past the rim, and the blend fades
+//     over that band. That is the shelving bank: the ground is walked down from
+//     wherever it naturally was to the water's edge over a few metres, instead
+//     of being cut off at the rim and left as a wall.
+// A paraboloid, not a smoothstep. A smoothstep bed only reaches full depth in
+// the middle 18% of the radius and leaves the rest under half a metre of water,
+// and half a metre is inside the shader's shoreline-foam band — the whole lake
+// rendered as surf. 1 − u² holds real depth across most of the basin and still
+// arrives at the waterline exactly on the rim.
+function _lakeTarget(lk, u) {
+  return lk.surf + 0.06 - lk.depth * (u < 1 ? 1 - u * u : 0);
+}
+// The surface height of whatever lake covers (theta, lat), or the river's own
+// waterline if none does. Each lake has its OWN level: the fields sit 4-6 m
+// above WATER_H, so a lake pinned to the river's datum is a 5 m pit with a
+// bank too steep to walk down and bare scree all round it. A tarn standing at
+// its own hollow's level needs a cut of centimetres.
+// `pad` (metres) widens the test past the rim — the terrain shader wants the
+// level of the lake it is STANDING BESIDE so it can shade the strand.
+function lakeSurf(theta, lat, pad = 0) {
+  let s = WATER_H;
+  for (let i = 0; i < LAKES.length; i++) {
+    const lk = LAKES[i];
+    if (_lakeU(lk, theta, lat) <= 1 + pad / lk.rl && lk.surf > s) s = lk.surf;
+  }
+  return s;
+}
 function _lakeBlend(theta, lat, h) {
   if (!_lakesReady) return h;
   for (let i = 0; i < LAKES.length; i++) {
     const lk = LAKES[i];
-    const t = _lakeT(lk, theta, lat, 0);
-    if (t <= 0) continue;
-    // zero at the rim, so the bank is exactly the ground that was already there
-    h += (_lakeBed(lk, t) - h) * _smooth(0, 0.46, t);
+    const u = _lakeU(lk, theta, lat);
+    if (u >= lk.apron) continue;
+    h += (_lakeTarget(lk, u) - h) * (1 - _smooth(1.0, lk.apron, u));
   }
   return h;
 }
@@ -1270,7 +1315,10 @@ function _lakeBlend(theta, lat, h) {
 // way to know a field is now under water.
 function inLake(theta, lat, pad = 0) {
   for (let i = 0; i < LAKES.length; i++) {
-    if (_lakeT(LAKES[i], theta, lat, pad) > 0) return true;
+    const lk = LAKES[i];
+    // pad is metres; the frame is normalised, so scale it by the short axis —
+    // the conservative choice, since it over-pads along the arc.
+    if (_lakeU(lk, theta, lat) <= 1 + pad / lk.rl) return true;
   }
   return false;
 }
@@ -1377,61 +1425,83 @@ function _rawTerrain(theta, lat) {
     }
     return true;
   };
-  const want = 5 + Math.floor(_layRng() * 4);          // 5..8
+  const want = 4 + Math.floor(_layRng() * 4);          // 4..7
   let guard = 0;
-  while (LAKES.length < want && guard++ < 9000) {
+  while (LAKES.length < want && guard++ < 24000) {
     const theta = _layRng() * Math.PI * 2;
     if (_degSep(theta / DEG, CASCADE_DEG) < 14) continue;
-    const rl = 8 + _layRng() * 10;                     // 8..18 m across the valley
-    const ra = rl * (1.6 + _layRng() * 2.2);           // 13..68 m along it
-    // Don't sample lat blind. Between the outer corridor and the mountain foot
-    // there is one usable band per side and it is narrow — 20-odd metres, and
-    // it moves as the road and the guideway wander. Sampling ±52 uniformly and
-    // rejecting threw away 99% of candidates and left the ring with one pond.
-    // Ask where the band IS at this theta, then sit in it.
+    const MARGIN = 1.95;                                // widest apron we allow
+    // Don't sample lat blind, and don't pick the size blind either. Between the
+    // outer corridor and the mountain foot there is one usable band per side, it
+    // is narrow — 20-odd metres — and it moves as the road and the guideway
+    // wander. Drawing a width first and rejecting whatever didn't fit threw away
+    // 99% of candidates AND biased the survivors to the minimum size: every lake
+    // came out the same 10 m puddle. So ask how wide the band IS here, then cut
+    // the lake to fit it. Wide stretches get real lakes, tight ones get ponds.
     const side = _layRng() < 0.5 ? -1 : 1;
-    const inner = side < 0
-      ? roadLat(theta) - (ROAD_HALF + ROAD_SHLDR + 5) - rl * 1.2
-      : railLatStatic(theta) + 8 + rl * 1.2;
-    const outer = side * (VALLEY_LAT - 4) - side * rl * 1.2;
-    if ((outer - inner) * side < 2) continue;          // no room on this side here
+    const in0 = side < 0
+      ? roadLat(theta) - (ROAD_HALF + ROAD_SHLDR + 5)
+      : railLatStatic(theta) + 8;
+    const out0 = side * (VALLEY_LAT - 4);
+    const rlMax = Math.min(11, ((out0 - in0) * side) / (2 * MARGIN));
+    if (rlMax < 5) continue;                           // no room on this side here
+    const rl = 5 + _layRng() * (rlMax - 5);            // 5..11 m of water across
+    const ra = rl * (2.0 + _layRng() * 3.0);           // 10..55 m along the valley
+    const inner = in0 + side * rl * MARGIN;
+    const outer = out0 - side * rl * MARGIN;
     const lat = inner + (outer - inner) * _layRng();
     const lk = {
       theta, s: theta * RF, lat, ra, rl,
-      depth: 3.0 + _layRng() * 2.8,
+      // Scaled to the short axis: 5 m of water in a 16 m-wide pool is a well,
+      // not a lake, and it is the lat direction that runs out of room first.
+      depth: _clamp(rl * 0.36, 2.4, 5.0),
+      apron: 1.5, surf: WATER_H,                       // provisional; set below
       p1: _layRng() * _TAU, p2: _layRng() * _TAU, p3: _layRng() * _TAU,
     };
-    // The perimeter, not just the centre — sampled in the ellipse's own frame.
+    // It will hold water wherever it goes — the target height inside the rim is
+    // below the waterline by construction. What matters instead is the CUT: how
+    // far the rim has to come down to reach the waterline, and how unevenly.
+    // The valley floor rolls ±3 m over a lake's own footprint, so a cut is
+    // unavoidable; a LOPSIDED one is what reads as a quarry, hence the spread
+    // test as well as the depth test.
+    let lo = Infinity, hi = -Infinity, sum = 0;
+    for (let a = 0; a < 12; a++) {
+      const ang = (a / 12) * _TAU, rim = lakeRim(lk, ang);
+      const g = _rawTerrain(theta + Math.cos(ang) * ra * rim / RF, lat + Math.sin(ang) * rl * rim);
+      if (g < lo) lo = g;
+      if (g > hi) hi = g;
+      sum += g;
+    }
+    // The lake stands just under the LOWEST point of its own rim — any higher
+    // and it pours out of that side. What is left to worry about is the
+    // unevenness: the high shore has to be cut down by the full spread, and
+    // there is only ~20 m of free lat to grade that away in. Past about 1 : 2
+    // the bank crosses the terrain shader's scree threshold and the lake comes
+    // out ringed in bare rock like a reservoir in a drought — so the spread is
+    // a SITING constraint. Lakes go in level hollows, which is where they go.
+    if (hi - lo > 3.6) continue;
+    lk.surf = lo - 0.35;
+    const drop = (hi - lo) + 0.35;
+    lk.apron = 1 + _clamp(drop / (rl * 0.55), 0.45, MARGIN - 1);
+
+    // Clearance last, because the footprint that has to be clear is the graded
+    // one, not the water — and how far the grading reaches is what we just
+    // worked out.
     let ok = true;
     for (let a = 0; a < 16 && ok; a++) {
       const ang = (a / 16) * _TAU;
       const x = Math.cos(ang), y = Math.sin(ang);
-      for (const f of [0.55, 1.15]) {
+      for (const f of [0.6, lk.apron]) {
         const th = theta + x * ra * f / RF, la = lat + y * rl * f;
         if (!clearOf(th, la, 2)) { ok = false; break; }
       }
     }
     if (!ok || !clearOf(theta, lat, 2)) continue;
     for (const o of LAKES) {
-      if (Math.abs(arcDelta(theta, o.theta)) < ra + o.ra + 16 &&
-          Math.abs(lat - o.lat) < rl + o.rl + 16) { ok = false; break; }
+      if (Math.abs(arcDelta(theta, o.theta)) < ra * lk.apron + o.ra * o.apron + 12 &&
+          Math.abs(lat - o.lat) < rl * lk.apron + o.rl * o.apron + 12) { ok = false; break; }
     }
     if (!ok) continue;
-    // Does it hold water, all the way round? Test near the RIM, not in the
-    // middle: at the middle the blend has already reached the flat bed, so the
-    // answer is trivially yes for any site whatever, including a site on a 1:3
-    // hillside where the finished thing is a puddle at the bottom of a quarry.
-    // At 0.70 of the radius the ground still has a real say, so a hillside shows
-    // up as dry bearings and the candidate is thrown out. Two may fail — that is
-    // a shelving beach on one shore, which is a feature, not a fault.
-    let dryBearings = 0;
-    for (let a = 0; a < 12; a++) {
-      const ang = (a / 12) * _TAU;
-      const f = 0.70, t = 1 - f;
-      const g = _rawTerrain(theta + Math.cos(ang) * ra * f / RF, lat + Math.sin(ang) * rl * f);
-      if (g + (_lakeBed(lk, t) - g) * _smooth(0, 0.46, t) > WATER_H - 0.15) dryBearings++;
-    }
-    if (dryBearings > 2) continue;
     LAKES.push(lk);
   }
   _lakesReady = true;
@@ -1762,7 +1832,9 @@ function groundH(theta, lat, refH) {
 // Water depth at a point (0 on dry land). Used for wading/swimming and for
 // tinting the water by depth.
 function waterDepth(theta, lat) {
-  const d = WATER_H - terrainH(theta, lat);
+  // lakeSurf, not WATER_H: a lake stands at its own hollow's level, and wading
+  // and swimming have to happen at the surface you can actually see.
+  const d = lakeSurf(theta, lat) - terrainH(theta, lat);
   return d > 0 ? d : 0;
 }
 // Terrain gradient magnitude (rise per meter) — the walkable-slope test.
@@ -1929,7 +2001,7 @@ if (typeof window !== 'undefined') {
     FLAT_SPOTS, LANES, laneSample, addHeightPatch, CROSSINGS, TRIBS, RIVER_BRIDGES,
     ISLANDS, onIsland, KNOLLS, tribEdges, waterEdges, LAYOUT_CHECK,
     mountainH: _mountainH, CASCADE,
-    SPURS, spurH, onSpur, ROAD_TUNNELS, RAIL_TUNNELS,
-    LAKES, inLake, lakeT: _lakeT, lakeRim, lakePoint, railLatStatic,
+    SPURS, spurH, onSpur, ROAD_TUNNELS, RAIL_TUNNELS, inBore,
+    LAKES, inLake, lakeU: _lakeU, lakeRim, lakePoint, lakeSurf, railLatStatic,
   };
 }

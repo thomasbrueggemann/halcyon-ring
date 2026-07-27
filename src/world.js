@@ -392,8 +392,8 @@ function buildWorld(scene, textures, colliders) {
         // into the lake with no strand at all. Height above the waterline is the
         // right key here: the bowl's own slope decides how wide the beach is, so
         // a shallow bay gets a broad one and a steep bank barely any.
-        if (inLake(theta, lat, 5.5)) {
-          sand = Math.max(sand, 1 - _sstep(0.0, 2.4 + jit * 0.8, h - WATER_H));
+        if (inLake(theta, lat, 2.5)) {
+          sand = Math.max(sand, 1 - _sstep(0.0, 1.2 + jit * 0.5, h - lakeSurf(theta, lat, 3))); 
         }
         // Snowline. There is no fourth splat layer, so the caps borrow the
         // sand map — pale and fine-grained — and the vertex colour below
@@ -413,6 +413,10 @@ function buildWorld(scene, textures, colliders) {
         const onRim = Math.max(_sstep(MTN_LAT0 - 8, MTN_LAT0, alat),
                                _sstep(2.0, 9.0, spurH(theta, lat)));
         rock = Math.max(rock, _sstep(15 + jit * 2.0, 30, h) * onRim);
+        // The bore floor is ordinary corridor ground — the notch is cut before
+        // the vault goes over it — so it comes out as a sunlit lawn under a
+        // mountain unless we say otherwise. It is a cut rock trench: floor it.
+        if (inBore(theta, lat)) { rock = 1; sand = 0; }
         rock *= 1 - sand;
         const grass = Math.max(0, 1 - rock - sand);
         splat[k * 3] = grass; splat[k * 3 + 1] = rock; splat[k * 3 + 2] = sand;
@@ -964,7 +968,12 @@ function buildWorld(scene, textures, colliders) {
   // laying a pane of water over the grass on the shallow side.
   if (LAKES.length) {
     const geos = [];
-    const A = 72, R = 7;
+    // The rings are bunched toward the shore, not spread evenly. The shader
+    // draws its foam over the last 0.32 m of depth, so with evenly spaced rings
+    // the outermost band of triangles is 5 m wide and interpolates that foam
+    // most of the way across the lake — a 40 m pool that renders milk-white.
+    const A = 72, R = 10;
+    const ringF = (r) => 1 - Math.pow(1 - r / (R - 1), 2.4);
     const p = new THREE.Vector3();
     for (const lk of LAKES) {
       const shore = new Float64Array(A);
@@ -973,7 +982,7 @@ function buildWorld(scene, textures, colliders) {
         const rim = lakeRim(lk, ang);
         const wet = (m) => {
           const q = lakePoint(lk, ang, m);
-          return terrainH(q.theta, q.lat) < WATER_H - 0.01;
+          return terrainH(q.theta, q.lat) < lk.surf - 0.01;
         };
         if (!wet(0)) { shore[a] = 0; continue; }
         let lo = 0, hi = rim;
@@ -991,13 +1000,13 @@ function buildWorld(scene, textures, colliders) {
       for (let a = 0; a < A; a++) {
         const ang = (a / A) * Math.PI * 2;
         for (let r = 0; r < R; r++) {
-          const m = shore[a] * (r / (R - 1));
+          const m = shore[a] * ringF(r);
           const q = lakePoint(lk, ang, m);
           const k = a * R + r;
-          torusPosition(q.theta, q.lat, WATER_H, p);
+          torusPosition(q.theta, q.lat, lk.surf, p);
           positions[k * 3] = p.x; positions[k * 3 + 1] = p.y; positions[k * 3 + 2] = p.z;
           uvs[k * 2] = q.theta * RF; uvs[k * 2 + 1] = q.lat;
-          depths[k] = Math.max(0, WATER_H - terrainH(q.theta, q.lat));
+          depths[k] = Math.max(0, lk.surf - terrainH(q.theta, q.lat));
           const c = Math.cos(q.theta), sn = Math.sin(q.theta);
           normals[k * 3] = -c; normals[k * 3 + 1] = 0; normals[k * 3 + 2] = -sn;
         }

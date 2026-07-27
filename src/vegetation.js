@@ -126,6 +126,7 @@ function buildVegetation(scene, textures, colliders, rng) {
     // A lake has a beach: waterDepth alone stops the planting exactly at the
     // waterline, which grows oaks with their roots in the shallows.
     if (inLake(theta, lat, 2.2)) return false;
+    if (inBore(theta, lat)) return false;             // nothing grows under a mountain
     if (terrainSlope(theta, lat) > 1.1) return false;
     return true;
   }
