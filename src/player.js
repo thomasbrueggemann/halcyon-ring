@@ -52,12 +52,61 @@ class Player {
       this.pitch -= e.movementY * MOUSE_SENS;
       this.pitch = Math.max(-1.52, Math.min(1.52, this.pitch));
     });
+
+    // ── gamepad (e.g. a USB N64 pad) ──
+    // Polled per-frame in update() rather than event-driven: the Gamepad API
+    // only exposes a snapshot, there's no per-axis change event.
+    this.gp = { ix: 0, iz: 0, jump: false, run: false };
+    this.gpInteractPressed = false;   // one-shot: consumed by main.js each frame
+    this._gpInteractHeld = false;
+    window.addEventListener('gamepadconnected', e => {
+      console.log('Gamepad connected:', e.gamepad.id);
+    });
   }
 
   key(c) { return this.keys.has(c); }
 
-  update(dt, gravityScale) {
+  // Reads the first connected pad every frame. Deadzone kills stick drift.
+  // The stick is look (no second stick needed), and the run button doubles
+  // as "walk forward" — held down, you move forward at run speed, no analog
+  // walk speed to worry about.
+  _pollGamepad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = pads && (pads[0] || pads[1] || pads[2] || pads[3]);
+    this.gp.ix = 0; this.gp.iz = 0; this.gp.jump = false; this.gp.run = false;
+    this.gp.climb = false; this.gp.lower = false;
+    if (!gp || !gp.connected) return;
+    const dz = 0.2;
+    const ax = v => (Math.abs(v) < dz ? 0 : v);
+    const lx = ax(gp.axes[0] || 0), ly = ax(gp.axes[1] || 0);
+    if (this.enabled) {
+      this.yaw -= lx * GAMEPAD_LOOK_SENS;
+      this.pitch -= ly * GAMEPAD_LOOK_SENS;
+      this.pitch = Math.max(-1.52, Math.min(1.52, this.pitch));
+    }
+    this.gp.jump = !!(gp.buttons[0] && gp.buttons[0].pressed);
+    this.gp.run = !!((gp.buttons[1] && gp.buttons[1].pressed) || (gp.buttons[2] && gp.buttons[2].pressed));
+    if (this.gp.run) this.gp.iz = 1;   // "run" button held → walk forward
+    this.gp.climb = !!(gp.buttons[12] && gp.buttons[12].pressed);   // zero-g up
+    this.gp.lower = !!(gp.buttons[13] && gp.buttons[13].pressed);   // zero-g down
+    const l = !!(gp.buttons[4] && gp.buttons[4].pressed);   // L shoulder
+    const r = !!(gp.buttons[7] && gp.buttons[7].pressed);   // R shoulder (this pad reports it at 7, not the standard 5)
+    if (l !== r) this.gp.ix = r ? 1 : -1;   // sidestep
+
+    // button 11 (right stick click) → interact, same as the E key (edge-triggered)
+    const interactHeld = !!(gp.buttons[11] && gp.buttons[11].pressed);
+    if (interactHeld && !this._gpInteractHeld) this.gpInteractPressed = true;
+    this._gpInteractHeld = interactHeld;
+  }
+
+  update(dt, gravityScale, lift = 0) {
     const zeroG = gravityScale < 0.06;
+    // Past halfway, the lift is stronger than your grip on the floor: you come
+    // off it whether you meant to or not. Below that you can still walk, you
+    // just weigh less. `lift` comes from GravitySystem and drives everything
+    // loose in the ring, so you go up with the crowd rather than watching it.
+    const lifted = lift > 0.5;
+    this._pollGamepad();
 
     // ── riding a train: glued to a seat, free mouse-look, WASD/gravity ignored ──
     if (this.ride) {
@@ -88,8 +137,10 @@ class Player {
     _fwd.set(0, 0, -1).applyQuaternion(_pQ);
     _right.set(1, 0, 0).applyQuaternion(_pQ);
 
-    const ix = (this.key('KeyD') ? 1 : 0) - (this.key('KeyA') ? 1 : 0);
-    const iz = (this.key('KeyW') ? 1 : 0) - (this.key('KeyS') ? 1 : 0);
+    let ix = (this.key('KeyD') ? 1 : 0) - (this.key('KeyA') ? 1 : 0);
+    let iz = (this.key('KeyW') ? 1 : 0) - (this.key('KeyS') ? 1 : 0);
+    if (ix === 0) ix = this.gp.ix;
+    if (iz === 0) iz = this.gp.iz;
 
     if (this.enabled && zeroG) {
       // ── free flight on maneuvering thrusters ──
@@ -100,8 +151,8 @@ class Player {
       _tmp.set(0, 0, -1).applyQuaternion(lookQ);
       _wish.addScaledVector(_tmp, iz);
       _wish.addScaledVector(_right, ix);
-      if (this.key('Space') && !this.suppressSpace) _wish.addScaledVector(_pUp, 1);
-      if (this.key('KeyC') || this.key('ControlLeft')) _wish.addScaledVector(_pUp, -1);
+      if ((this.key('Space') || this.gp.jump || this.gp.climb) && !this.suppressSpace) _wish.addScaledVector(_pUp, 1);
+      if (this.key('KeyC') || this.key('ControlLeft') || this.gp.lower) _wish.addScaledVector(_pUp, -1);
       if (_wish.lengthSq() > 0) {
         _wish.normalize();
         this.vel.addScaledVector(_wish, THRUST_ACCEL * dt);
@@ -110,7 +161,7 @@ class Player {
       if (this.vel.length() > 26) this.vel.setLength(26);
     } else if (this.enabled) {
       // ── walking under spin gravity ──
-      const running = this.key('ShiftLeft') || this.key('ShiftRight');
+      const running = this.key('ShiftLeft') || this.key('ShiftRight') || this.gp.run;
       // Wading costs you speed; once it is over chest height you are swimming.
       const wade = this.wadeDepth;
       const drag = wade > 0 ? 1 - 0.62 * Math.min(1, wade / 1.3) : 1;
@@ -129,7 +180,7 @@ class Player {
       this.vel.copy(_tmp).addScaledVector(_pUp, vUp);
       this.speedAlongGround = _tmp.length();
 
-      if (this.grounded && this.key('Space') && !this.suppressSpace && gravityScale > 0.25) {
+      if (this.grounded && (this.key('Space') || this.gp.jump) && !this.suppressSpace && gravityScale > 0.25) {
         this.vel.addScaledVector(_pUp, JUMP_SPEED * Math.sqrt(gravityScale));
         this.grounded = false;
       }
@@ -137,6 +188,10 @@ class Player {
 
     // gravity (scaled by wheel spin)
     this.vel.addScaledVector(_pUp, -G_FULL * gravityScale * dt);
+    if (lift > 0 && !this.grounded) {
+      const vUp = this.vel.dot(_pUp);
+      this.vel.addScaledVector(_pUp, (LIFT_RISE * lift - vUp) * Math.min(1, LIFT_EASE * lift * dt));
+    }
 
     // integrate
     this.pos.addScaledVector(this.vel, dt);
@@ -155,8 +210,8 @@ class Player {
       this.h = g;
       const vUp = this.vel.dot(_pUp);
       if (vUp < 0) this.vel.addScaledVector(_pUp, -vUp * (zeroG ? 1.4 : 1)); // soft bounce in zero-g
-      if (!zeroG) this.grounded = true;
-    } else if (!zeroG && wasGrounded && this.h - g < 0.45) {
+      if (!zeroG && !lifted) this.grounded = true;
+    } else if (!zeroG && !lifted && wasGrounded && this.h - g < 0.45) {
       // snap-down: stay in contact when walking downhill so crests don't launch you
       const vUp = this.vel.dot(_pUp);
       if (vUp <= 0.5) {
@@ -208,7 +263,7 @@ class Player {
           this.h += (target - this.h) * Math.min(1, 5 * dt);
           this.vel.addScaledVector(_pUp, -vUp * Math.min(1, 6 * dt));
           this.vel.multiplyScalar(Math.max(0, 1 - 2.2 * dt));   // drag
-          if (this.key('Space') && !this.suppressSpace) this.vel.addScaledVector(_pUp, 3.5 * dt);
+          if ((this.key('Space') || this.gp.jump) && !this.suppressSpace) this.vel.addScaledVector(_pUp, 3.5 * dt);
         }
       }
     }
@@ -279,12 +334,14 @@ class Player {
     torusPosition(this.theta, this.lat, this.h, this.pos);
   }
 
-  // A shove used when the wheel spins down — inertia carries you forward.
+  // A shove used when the wheel spins down — inertia carries you forward. The
+  // upward part is small now: the sustained lift does the rising, and stacking
+  // a launch on top of it fired you at the ceiling before you could look around.
   driftKick(rng) {
     tangentAt(this.theta, _pTan);
     upAt(this.theta, _pUp);
-    this.vel.addScaledVector(_pTan, 2.5 + rng() * 2.5);
-    this.vel.addScaledVector(_pUp, 1.2 + rng() * 1.5);
-    this.vel.y += (rng() - 0.5) * 1.5;
+    this.vel.addScaledVector(_pTan, 1.6 + rng() * 1.8);
+    this.vel.addScaledVector(_pUp, 0.3 + rng() * 0.5);
+    this.vel.y += (rng() - 0.5) * 1.2;
   }
 }

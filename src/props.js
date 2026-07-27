@@ -57,19 +57,25 @@ function buildProps(scene, textures, rng) {
 
   function kickAll() {
     for (const p of props) {
-      p.vel.set((rng() - 0.5) * 2.4, (rng() - 0.5) * 2.4, (rng() - 0.5) * 2.4);
+      // just enough to set each one tumbling — the rise itself comes from the
+      // sustained lift in update(), same as the citizens
+      p.vel.set((rng() - 0.5) * 1.1, (rng() - 0.5) * 1.1, (rng() - 0.5) * 1.1);
       const t = worldToTorus(p.pos);
       upAt(t.theta, _propsUp);
-      p.vel.addScaledVector(_propsUp, 0.8 + rng() * 1.6);
+      p.vel.addScaledVector(_propsUp, 0.2 + rng() * 0.5);
       p.rot.set((rng() - 0.5) * 1.6, (rng() - 0.5) * 1.6, (rng() - 0.5) * 1.6);
     }
   }
 
-  function update(dt, gravityScale, zeroG) {
+  function update(dt, gravityScale, zeroG, lift = 0) {
     for (const p of props) {
       const t = worldToTorus(p.pos);
       upAt(t.theta, _propsUp);
       p.vel.addScaledVector(_propsUp, -G_FULL * gravityScale * dt);
+      if (lift > 0) {
+        const vUp = p.vel.dot(_propsUp);
+        p.vel.addScaledVector(_propsUp, (LIFT_RISE * lift - vUp) * Math.min(1, LIFT_EASE * lift * dt));
+      }
       if (zeroG) p.vel.multiplyScalar(Math.max(0, 1 - 0.05 * dt));
       p.pos.addScaledVector(p.vel, dt);
 
@@ -84,7 +90,8 @@ function buildProps(scene, textures, rng) {
         if (vUp < 0) {
           p.vel.addScaledVector(_propsUp, -vUp * 1.3);       // restitution 0.3
           p.vel.multiplyScalar(0.92);                    // ground friction
-          if (Math.abs(vUp) < 0.4 && !zeroG) { p.vel.set(0, 0, 0); p.rot.set(0, 0, 0); }
+          // don't glue a crate to the floor while the lift is trying to peel it off
+          if (Math.abs(vUp) < 0.4 && !zeroG && lift < 0.15) { p.vel.set(0, 0, 0); p.rot.set(0, 0, 0); }
         }
       }
       // hull

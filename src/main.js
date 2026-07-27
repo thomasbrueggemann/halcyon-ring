@@ -57,16 +57,19 @@ scene.add(camera);
 const sun = new THREE.DirectionalLight(0xfff2e0, 2.5);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -95; sun.shadow.camera.right = 95;
-sun.shadow.camera.top = 95; sun.shadow.camera.bottom = -95;
+sun.shadow.camera.left = -120; sun.shadow.camera.right = 120;
+sun.shadow.camera.top = 120; sun.shadow.camera.bottom = -120;
 sun.shadow.camera.near = 1; sun.shadow.camera.far = 900;
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.035;
 scene.add(sun, sun.target);
 
 // With IBL carrying the ambient term, the fill lights drop right back —
-// leaving them where they were washed out every shadow the sun cast.
-const hemi = new THREE.HemisphereLight(0xbfd9ee, 0x51663d, 0.30);
+// leaving them where they were washed out every shadow the sun cast. The
+// hemisphere term earns its keep again now the mountain rims exist: whichever
+// way the sun offset leans, one of the two inner faces is always backlit, and
+// without a sky fill that whole side of the valley goes to a black cutout.
+const hemi = new THREE.HemisphereLight(0xbfd9ee, 0x51663d, 0.55);
 scene.add(hemi);
 scene.add(new THREE.AmbientLight(0xffffff, 0.10));
 
@@ -80,6 +83,7 @@ const { stations } = buildCity(scene, textures, colliders, rng);
 const transit = buildTransit(scene, colliders, rng);
 buildVegetation(scene, textures, colliders, rng);
 const props = buildProps(scene, textures, rng);
+const hydro = buildHydro(scene, rng);
 
 const player = new Player(camera, colliders);
 transit.player = player;
@@ -189,7 +193,7 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-window.__game = { player, gravity, puzzles, stations, scene, camera, transit, npcs };
+window.__game = { player, gravity, puzzles, stations, scene, camera, transit, npcs, hydro, props, world };
 
 // ── frame loop ──
 const clock = new THREE.Clock();
@@ -203,12 +207,18 @@ function animate() {
 
   gravity.update(dt);
   const gScale = gravity.gravityScale;
+  const lift = gravity.lift;
 
   player.suppressSpace = ui.modal === 'align';
-  player.update(dt, gScale);
+  player.update(dt, gScale, lift);
+  if (player.gpInteractPressed && player.enabled && !ui.modal) {
+    if (!transit.tryInteract()) puzzles.tryInteract();
+  }
+  player.gpInteractPressed = false;
   transit.update(dt);
-  props.update(dt, gScale, gravity.zeroG);
-  npcs.update(dt, gScale, gravity.zeroG, player);
+  props.update(dt, gScale, gravity.zeroG, lift);
+  npcs.update(dt, gScale, gravity.zeroG, player, lift);
+  hydro.update(dt, gScale, lift);
   puzzles.update(dt);
   if (transit.prompt) ui.setPrompt(transit.prompt);   // transit hint overrides
   sky.update(gravity.spinAngle);
@@ -225,13 +235,13 @@ function animate() {
   upAt(player.theta, _mainUp);
   tangentAt(player.theta, _mainTan);
   sun.position.copy(player.pos)
-    .addScaledVector(_mainUp, 320)
+    .addScaledVector(_mainUp, 360)
     .addScaledVector(_mainTan, 150);
-  sun.position.y += 110;
+  sun.position.y += 45;      // only a slight lat lean, so neither rim is fully backlit
   sun.target.position.copy(player.pos);
 
   // ambient animation
-  world.update(t);
+  world.update(t, dt);
   driftGroup.position.copy(player.pos);
   driftGroup.rotation.y = t * 0.03;
   driftGroup.rotation.x = t * 0.017;

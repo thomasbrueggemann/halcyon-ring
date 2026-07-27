@@ -3,9 +3,9 @@
 // "Floor" is the outermost habitable band of the tube; spin gravity points
 // radially outward from the spin axis (i.e. from the axis toward the floor).
 
-const RT   = 70;                    // tube (minor) radius
-const HALF_W = 55;                  // half-width of the flat floor chord
-const CHORD_DROP = Math.sqrt(RT * RT - HALF_W * HALF_W); // tube center → floor
+const RT   = 105;                   // tube (minor) radius
+const HALF_W = 84;                  // half-width of the flat floor chord
+const CHORD_DROP = Math.sqrt(RT * RT - HALF_W * HALF_W); // tube center → floor (63)
 const RF   = 940;                   // cylindrical radius of the floor
 const RMAJ = RF - CHORD_DROP;       // cylindrical radius of tube center
 const CIRCUMFERENCE = 2 * Math.PI * RF;   // ≈ 5.9 km of walkable ring
@@ -15,14 +15,26 @@ const CIRCUMFERENCE = 2 * Math.PI * RF;   // ≈ 5.9 km of walkable ring
 // window frames (exactly as in the Don Davis painting). FLOOR_LAT is where the
 // terrain hands over to the glazed hull; the terrain's outermost ring of
 // vertices sits precisely on the tube there, so there is no seam.
-const FLOOR_LAT = 63;
+const FLOOR_LAT = 95;
 const HULL_H_AT = (lat) => CHORD_DROP - Math.sqrt(Math.max(0, RT * RT - lat * lat));
-const FLOOR_EDGE_H = HULL_H_AT(FLOOR_LAT);      // ≈ 12.79 m
+const FLOOR_EDGE_H = HULL_H_AT(FLOOR_LAT);      // ≈ 18.28 m
 
-// Outermost lat any building may occupy. Well inside FLOOR_LAT so structures
-// stay on the near-flat floor instead of climbing the up-curving hull wall (or,
-// past FLOOR_LAT, ending up outside the ring altogether).
-const BUILD_LAT = 46;
+// ── The three lat zones, from the middle out ────────────────────────────────
+// The tube is 190 m across now, and it is deliberately NOT all valley. The
+// settled valley (road, river, guideway, houses, farms) is pinned inside
+// ±VALLEY_LAT exactly where it always was — every one of its curves is tuned
+// against the others and widening it would move the whole world. The extra
+// width beyond it is new ground: a rocky mountain rim that climbs out of the
+// fields, crests around MTN_CREST, and comes back down to meet the glazing at
+// MTN_LAT1. That is where the crags, the snowline and the waterfall live.
+const VALLEY_LAT = 52;   // corridors, buildings and farmland stay inside this
+const MTN_LAT0   = 58;   // the ground starts to climb here
+const MTN_CREST  = 76;   // ridge crest band
+const MTN_LAT1   = 93;   // back down to the glazing shoreline (< FLOOR_LAT)
+
+// Outermost lat any building may occupy. Well inside VALLEY_LAT so structures
+// stay on the near-flat floor instead of climbing into the mountain rim.
+const BUILD_LAT = 48;
 
 // Ring road cross-section (meters)
 const ROAD_HALF   = 4.4;            // carriageway half-width
@@ -46,6 +58,16 @@ const RUN_SPEED    = 9.5;
 const JUMP_SPEED   = 4.6;
 const THRUST_ACCEL = 7.5;            // zero-g maneuvering thrusters
 const MOUSE_SENS   = 0.0022;
+const GAMEPAD_LOOK_SENS = 0.02;      // rad/frame at full stick deflection
+
+// ── Free-fall chaos ─────────────────────────────────────────────────────────
+// When the wheel stalls, everything loose lifts off the floor together. These
+// govern how fast: LIFT_RISE is a terminal drift speed, not an acceleration, so
+// a stalled ring fills up with slowly rising people, animals, crates and water
+// instead of firing them at the ceiling.
+const LIFT_ONSET_G = 0.55;   // gravityScale at which things start to lift
+const LIFT_RISE    = 1.9;    // m/s drift toward the spin axis at full lift
+const LIFT_EASE    = 0.55;   // how quickly drift converges on LIFT_RISE (1/s)
 
 // Gravity-failure event cadence (seconds)
 const FIRST_FAILURE_AT = 75;

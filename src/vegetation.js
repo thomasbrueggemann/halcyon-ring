@@ -104,7 +104,10 @@ function buildVegetation(scene, textures, colliders, rng) {
   const PAVED = [{ theta: 6 * DEG, lat: 0, r: 25 }]
     .concat(SPOKE_THETAS.map(t => ({ theta: t, lat: 0, r: 15 })));
   function siteOK(theta, lat) {
-    if (Math.abs(lat) > FLOOR_LAT - 6) return false;
+    // The tree line: nothing takes root once the mountain rim goes to rock.
+    // Below it the slope test does the rest, so the stands thin out naturally
+    // up the lower slopes instead of stopping along a drawn line.
+    if (Math.abs(lat) > MTN_LAT0 + 10) return false;
     for (const q of PAVED) {
       if (Math.hypot(arcDelta(theta, q.theta), lat - q.lat) < q.r) return false;
     }
@@ -338,6 +341,38 @@ function buildVegetation(scene, textures, colliders, rng) {
       tryPlace(boulders,
         theta + ((rng() - 0.5) * spread) / RF, cLat + (rng() - 0.5) * spread,
         1.0 + rng() * 2.4, 1.4);
+    }
+  }
+
+  // ── Mountain outcrops and scree ──
+  // The rim is 30–80 m of bare rock, and a heightfield that size with nothing
+  // standing on it has no scale: you cannot tell a 40 m face from a 4 m bank.
+  // Blocks and scree fans do that job. They deliberately bypass siteOK's slope
+  // test — steep ground is exactly where they belong — but still refuse to sit
+  // in the water, on a path, or inside the Cascade gorge.
+  {
+    const gorge = (theta, lat) =>
+      lat > 40 && Math.abs(arcDelta(CASCADE.theta, theta)) < 46;
+    const rockSiteOK = (theta, lat) => {
+      if (Math.abs(lat) < MTN_LAT0 - 8 || Math.abs(lat) > MTN_LAT1 - 3) return false;
+      if (terrainH(theta, lat) < 14) return false;          // still down in the fields
+      if (terrainSlope(theta, lat) > 2.3) return false;     // sheer face — nothing lodges
+      if (gorge(theta, lat)) return false;
+      return !colliders.resolve(theta * RF, lat, 0.4, 1.2);
+    };
+    for (let c = 0; c < 260; c++) {
+      const theta = rng() * Math.PI * 2;
+      const side = rng() < 0.5 ? -1 : 1;
+      const cLat = side * (MTN_LAT0 - 2 + rng() * 26);
+      if (!rockSiteOK(theta, cLat)) continue;
+      // one erratic block, then a scree fan spilling downhill from it
+      boulders.push({ theta, lat: cLat, yaw: rng() * Math.PI * 2, scale: 1.6 + rng() * 3.4 });
+      const n = 6 + Math.floor(rng() * 12);
+      for (let i = 0; i < n; i++) {
+        const th = theta + ((rng() - 0.5) * 16) / RF;
+        const la = cLat - side * rng() * 11;               // downhill = toward the valley
+        if (rockSiteOK(th, la)) rocks.push({ theta: th, lat: la, yaw: rng() * Math.PI * 2, scale: 0.5 + rng() * 1.5 });
+      }
     }
   }
 

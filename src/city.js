@@ -572,7 +572,7 @@ function buildCity(scene, textures, colliders, rng) {
             : railLat(theta) + (5 + (band - 2) * 14);
           const lat1 = lat0 + (near ? -12 : 12);
           const lo = Math.min(lat0, lat1), hi = Math.max(lat0, lat1);
-          if (lo < -(FLOOR_LAT - 8) || hi > FLOOR_LAT - 8) continue;
+          if (lo < -VALLEY_LAT || hi > VALLEY_LAT) continue;   // fields, not mountainside
           // never plant into the water or across the carriageway
           const rl = riverLat(theta), rh = riverHalf(theta);
           if (hi > rl - rh - 2 && lo < rl + rh + 2) continue;

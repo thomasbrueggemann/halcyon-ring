@@ -53,6 +53,9 @@ function _gaussArc(theta, centerDeg, sigma) {
   const d = arcDelta(theta, centerDeg * DEG);
   return Math.exp(-(d * d) / (2 * sigma * sigma));
 }
+// The Cascade's course is measured off the un-carved landscape, so the carve
+// stays inert until the table below it exists. See _cascadeCarve / CASCADE.
+let _cascadeReady = false;
 
 // ── Smooth obstacle repulsion (unchanged machinery) ─────────────────────────
 // Build a list of {thetaDeg, sigma, amt} smooth repulsion bumps from a base
@@ -178,11 +181,130 @@ function _applyRepulsion(theta, buckets) {
 // Flat across the middle, then the ground curves up and BECOMES the tube wall:
 // sideProfile(±FLOOR_LAT) is exactly the hull's own height there, so the
 // terrain mesh and the glazed hull share an edge with no seam and no gap.
+// This is only the BASE sweep — the mountain rim (below) rides on top of it.
+const _SIDE_SHOULDER = 9.6;                    // height at the top of the valley wall
 function sideProfile(lat) {
   const a = Math.min(lat < 0 ? -lat : lat, FLOOR_LAT);
-  const lower = 7.4 * _smooth(21, 47, a);                       // the hillsides
-  const upper = (FLOOR_EDGE_H - 7.4) * _smooth(49, FLOOR_LAT, a); // final sweep into the glass
-  return lower + upper;
+  const lower = _SIDE_SHOULDER * _smooth(24, MTN_LAT0, a);               // the hillsides
+  const upper = (FLOOR_EDGE_H - _SIDE_SHOULDER) * _smooth(MTN_LAT1 - 8, FLOOR_LAT, a);
+  return lower + upper;                                       // final sweep into the glass
+}
+
+// ── The mountain rim ────────────────────────────────────────────────────────
+// Beyond the settled valley the ground climbs into a rocky ridge that runs the
+// whole ring on both sides — the thing that makes 190 m of tube read as a
+// landscape rather than a wide trough. The crest wanders in height and breaks
+// into spurs and gullies, then the far face drops back to meet the glazing at
+// MTN_LAT1, so the terrain/hull seam at FLOOR_LAT is untouched.
+//
+// Everything here is 2π-periodic by construction (integer harmonics only), and
+// the whole term is exactly zero inside |lat| < MTN_LAT0 — the valley cannot
+// feel the mountains at all, so none of its tuned curves move.
+const CASCADE_DEG = 212;         // where the waterfall comes off the +lat rim
+
+// ── Periodic ridged value-noise ─────────────────────────────────────────────
+// Harmonics alone give a mountain ONE shape repeated round the ring; peaks need
+// noise. This lattice wraps at `cells` in the arc direction, so it is exactly
+// 2π-periodic (no seam at θ = 0) while still being aperiodic to the eye.
+function _mtnHash(ix, iy) {
+  let h = Math.imul(ix | 0, 374761393) ^ Math.imul(iy | 0, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function _vnoise(x, y, cells) {
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const fx = x - x0, fy = y - y0;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const xa = ((x0 % cells) + cells) % cells, xb = (xa + 1) % cells;
+  const a = _mtnHash(xa, y0), b = _mtnHash(xb, y0);
+  const c = _mtnHash(xa, y0 + 1), d = _mtnHash(xb, y0 + 1);
+  return (a + (b - a) * ux) * (1 - uy) + (c + (d - c) * ux) * uy;
+}
+// Ridged fBm: folding each octave through 1-|2n-1| and squaring it turns
+// rounded hills into sharp crests with steep-sided valleys between them, which
+// is what makes a heightfield read as rock instead of as a sand dune. Four
+// octaves — the finest lattice cell is ~7.7 m, twice the terrain grid step, so
+// nothing aliases.
+const _MTN_CELLS0 = 96;                                  // ≈ 61 m per base cell
+function _mtnFbm(theta, lat, side) {
+  const yOff = side > 0 ? 0 : 53.5;
+  let sum = 0, norm = 0, amp = 1, cells = _MTN_CELLS0;
+  const uBase = theta / (2 * Math.PI);
+  for (let o = 0; o < 4; o++) {
+    const n = _vnoise(uBase * cells, (lat / CIRCUMFERENCE) * cells + yOff, cells);
+    const r = 1 - Math.abs(2 * n - 1);
+    sum += amp * r * r;
+    norm += amp;
+    amp *= 0.52; cells *= 2;
+  }
+  return sum / norm;
+}
+
+// Where the ground starts to climb, per theta and per side. A FIXED foot makes
+// the rim read as one long extruded wall no matter how you texture it; letting
+// it advance and retreat by ±8 m turns the same wall into headlands and bays
+// with the fields running up into them. Clamped clear of VALLEY_LAT so a
+// wandering road can never end up inside the mountain.
+function _mtnFoot(theta, side) {
+  const p = side > 0 ? 0 : 1.9;
+  const f = MTN_LAT0 + 5.0
+    + 4.6 * Math.sin(theta + 0.31 + p)
+    + 3.4 * Math.sin(2 * theta + 2.74 + p)
+    + 2.2 * Math.sin(3 * theta + 5.52 + p)
+    + 1.4 * Math.sin(6 * theta + 1.13 + p);
+  return f < MTN_LAT0 - 2 ? MTN_LAT0 - 2 : f;
+}
+// Crest height, per side (different phases so the two rims are not mirrors).
+function _mtnAmp(theta, side) {
+  const p = side > 0 ? 0 : 2.13;
+  const a = 33
+    + 12.0 * Math.sin(theta + 0.72 + p)
+    +  8.5 * Math.sin(2 * theta + 2.31 + p)
+    +  5.4 * Math.sin(3 * theta + 5.14 + p)
+    +  3.6 * Math.sin(5 * theta + 1.20 + p);
+  return a < 9 ? 9 : a;
+}
+// The two named high ranges. Kept OUT of _mtnAmp because that term is scaled by
+// the fBm, and a col landing on the Cascade would have quietly halved the
+// waterfall. These are mostly added straight, so the massifs are guaranteed.
+function _mtnMassif(theta) {
+  return 34.0 * _gaussArc(theta, CASCADE_DEG, 240)    // the massif the falls come off
+       + 18.0 * _gaussArc(theta, 118, 190);           // the range above the farms
+}
+// Relief on the face. Folding a sine through |·| turns a smooth dune into a
+// spine with a sharp crest and V-gullies between the spurs; the lat-modulated
+// terms then break those spurs into buttresses and hanging shelves, so the face
+// has depth from any angle instead of reading as vertical corduroy.
+function _mtnCrag(theta, lat, side) {
+  const p = side > 0 ? 0 : 1.37;
+  const r1 = 1 - Math.abs(Math.sin(6 * theta + p));
+  const r2 = 1 - Math.abs(Math.sin(11 * theta + 2.2 + p));
+  const r3 = 1 - Math.abs(Math.sin(19 * theta + 4.4 + p));
+  const r4 = 1 - Math.abs(Math.sin(37 * theta + 0.9 + p));
+  const gully = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(lat * 0.20 + p));
+  return (r1 * 11.0 + r2 * 6.0 + r3 * 3.2 + r4 * 1.6) * gully
+       + 6.0 * Math.sin(3 * theta + 1.10 + p) * Math.cos(lat * 0.14 + 0.60)
+       + 3.2 * Math.sin(9 * theta + 3.70 + p) * Math.sin(lat * 0.23 + 2.10)
+       + 1.8 * Math.sin(17 * theta + 5.20 + p) * Math.cos(lat * 0.35 + 1.30);
+}
+function _mountainH(theta, lat) {
+  const a = lat < 0 ? -lat : lat;
+  if (a <= MTN_LAT0 - 2 || a >= MTN_LAT1) return 0;
+  const side = lat < 0 ? -1 : 1;
+  const foot = _mtnFoot(theta, side);
+  if (a <= foot) return 0;
+  // One normalized coordinate from the foot to the glazing shoreline: the crest
+  // sits at u ≈ 0.55 and the far face always lands on MTN_LAT1, so however far
+  // the foot wanders the rim still meets the hull exactly where it must.
+  const u = (a - foot) / (MTN_LAT1 - foot);
+  const w = _smooth(0, 0.55, u) * (1 - _smooth(0.70, 1, u));
+  if (w <= 0) return 0;
+  // The harmonics set how high this stretch of rim gets; the ridged fBm decides
+  // where the peaks and the cols actually fall, and the crag term cuts the
+  // gullies into the face.
+  const f = _mtnFbm(theta, lat, side);
+  const massif = _mtnAmp(theta, side) * (0.30 + 0.85 * f) + _mtnMassif(theta) * (0.60 + 0.40 * f);
+  return w * (massif + _mtnCrag(theta, lat, side));
 }
 
 // ── River — the primary curve everything else hangs off ─────────────────────
@@ -245,7 +367,7 @@ const STATIONS = [
   // _riverHalfCore, not riverHalf(): the memo behind the public accessor also
   // computes riverLat, whose avoidance solve is not built yet at this point.
   const lat = _riverHarm(theta) + _riverHalfCore(theta) + Math.max(17, _railGapBase(theta));
-  return { name: st.name, thetaDeg: st.thetaDeg, theta, lat: Math.min(lat, FLOOR_LAT - 15) };
+  return { name: st.name, thetaDeg: st.thetaDeg, theta, lat: Math.min(lat, VALLEY_LAT - 4) };
 });
 
 // ── Flat spots (puzzle set-pieces, spoke pads, plaza, station platforms) ────
@@ -369,7 +491,7 @@ function _roadBase(theta) {
   return L.riverLat - L.riverHalf - Math.max(ROAD_GAP_MIN, _roadGapBase(theta));
 }
 const _roadAvoidBuckets = _indexRepulsion(_buildRepulsion(_roadBase, ROAD_AVOID));
-const ROAD_LAT_MIN = -(FLOOR_LAT - 14);        // stay off the steep upper hillside
+const ROAD_LAT_MIN = -VALLEY_LAT;              // stay out of the mountain rim
 // `wet` is the hard guarantee: whatever the avoidance solve asks for, the road
 // never gets closer to the water than its own shoulder plus 3 m of bank.
 function _roadLatCore(theta, rLat, rHalf) {
@@ -418,7 +540,7 @@ function railLat(theta) {
     }
   }
   const dry = riverLat(theta) + riverHalf(theta) + 8.0;
-  return _clamp(Math.max(lat, dry), -12, FLOOR_LAT - 14);
+  return _clamp(Math.max(lat, dry), -12, VALLEY_LAT);
 }
 // Guideway deck height: rides ~7 m above whatever ground is under it, easing to
 // exactly 6.0 m at each station (station pads are flat spots, so the ground
@@ -448,7 +570,7 @@ const TRIBS = (function () {
   return degs.map((deg) => {
     const theta = deg * DEG;
     const latLo = riverLat(theta) - riverHalf(theta) - 1.0;      // mouth, at the water
-    const latHi = _clamp(roadLat(theta) - (16 + _layRng() * 16), -(FLOOR_LAT - 6), latLo - 12);
+    const latHi = _clamp(roadLat(theta) - (16 + _layRng() * 16), -(MTN_LAT0 - 4), latLo - 12);
     const drift = (_layRng() - 0.5) * 34;                        // arc offset of the head
     return {
       theta, deg,
@@ -596,7 +718,7 @@ const KNOLLS = (function () {
     if (Math.abs(lat - rl) < rh + 7) return false;                       // out of the water
     if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + 9) return false;
     if (Math.abs(lat - railLat(theta)) < 9) return false;                // off the guideway
-    if (Math.abs(lat) > FLOOR_LAT - 7) return false;
+    if (Math.abs(lat) > VALLEY_LAT + 2) return false;                    // knolls are a valley feature
     const spots = _spotsNear(theta);
     for (let i = 0; i < spots.length; i++) {
       const f = spots[i];
@@ -605,10 +727,10 @@ const KNOLLS = (function () {
     return true;
   };
   let guard = 0;
-  while (out.length < 18 && guard++ < 4000) {
+  while (out.length < 30 && guard++ < 8000) {
     const theta = _layRng() * Math.PI * 2;
-    const r = 12 + _layRng() * 16;
-    const h = 3.2 + _layRng() * 5.6;
+    const r = 12 + _layRng() * 18;
+    const h = 3.2 + _layRng() * 7.0;
     const side = _layRng() < 0.5 ? -1 : 1;
     const lat = side * (16 + _layRng() * 30);
     // reject on the footprint, not the centre
@@ -649,12 +771,14 @@ function _knollBump(theta, lat) {
 
 // ── Terrain ─────────────────────────────────────────────────────────────────
 function _hills(theta, lat) {
-  return 1.05 * Math.sin(2 * theta + 4.10) * Math.cos(0.030 * lat + 0.70)
-       + 0.80 * Math.sin(3 * theta + 0.60) * Math.sin(0.055 * lat + 0.40)
-       + 0.62 * Math.sin(5 * theta + 2.30) * Math.cos(0.070 * lat + 1.10)
-       + 0.45 * Math.cos(7 * theta + 0.90) * Math.sin(0.050 * lat)
-       + 0.32 * Math.sin(11 * theta + 3.30) * Math.sin(0.160 * lat + 2.20)
-       + 0.20 * Math.sin(17 * theta + 1.15) * Math.cos(0.210 * lat + 0.30);  // Σ|A| = 3.44
+  return 1.55 * Math.sin(2 * theta + 4.10) * Math.cos(0.030 * lat + 0.70)
+       + 1.20 * Math.sin(3 * theta + 0.60) * Math.sin(0.055 * lat + 0.40)
+       + 0.90 * Math.sin(5 * theta + 2.30) * Math.cos(0.070 * lat + 1.10)
+       + 0.66 * Math.cos(7 * theta + 0.90) * Math.sin(0.050 * lat)
+       + 0.48 * Math.sin(11 * theta + 3.30) * Math.sin(0.160 * lat + 2.20)
+       + 0.30 * Math.sin(17 * theta + 1.15) * Math.cos(0.210 * lat + 0.30)
+       + 0.20 * Math.sin(23 * theta + 5.05) * Math.cos(0.310 * lat + 1.80)
+       + 0.13 * Math.sin(31 * theta + 2.40) * Math.sin(0.430 * lat + 0.95);  // Σ|A| = 5.42
 }
 
 const FLOODPLAIN = 1.65;   // general land level above the h = 0 datum
@@ -663,12 +787,14 @@ const FLOODPLAIN = 1.65;   // general land level above the h = 0 datum
 // hills, the river channel, tributary gullies and the islands.
 function _rawTerrain(theta, lat) {
   const a = lat < 0 ? -lat : lat;
-  const edgeFade = 1 - _smooth(52, FLOOR_LAT, a);   // everything settles onto the hull at the rim
+  // Only the last few metres before the glazing settle onto the hull now — the
+  // old 52 m fade would have flattened the whole mountain rim back down.
+  const edgeFade = 1 - _smooth(FLOOR_LAT - 12, FLOOR_LAT, a);
   const L = _prime(theta);
   const rl = L.riverLat, rh = L.riverHalf;
   const u = Math.abs(lat - rl);
 
-  let h = sideProfile(lat);
+  let h = sideProfile(lat) + _mountainH(theta, lat);
   let soil = FLOODPLAIN;
   soil += _hills(theta, lat) * _smooth(rh + 2, rh + 26, u);   // no bumps inside the channel
   soil -= 0.9 * (1 - _smooth(rh + 3, rh + 40, u));            // land tips gently toward the water
@@ -685,7 +811,154 @@ function _rawTerrain(theta, lat) {
     const bed = WATER_H - RIVER_DEPTH * Math.pow(1 - t * t, 0.75);
     h = h * (1 - w) + bed * w;
   }
-  return h + _islandBump(theta, lat) + _knollBump(theta, lat) * edgeFade;
+  h += _islandBump(theta, lat) + _knollBump(theta, lat) * edgeFade;
+  return _cascadeCarve(theta, lat, h);
+}
+
+// ── The Cascade ─────────────────────────────────────────────────────────────
+// A gorge cut into the inner face of the +lat mountain rim: a hanging gully at
+// the crest, a sheer fall off the lip, a plunge basin at the toe, and an
+// outflow stream that runs down across the fields (under the guideway) into the
+// river. world.js hangs the water sheet, the pool and the mist off the numbers
+// derived here, so the drawn falls and the walkable rock are the same shape.
+//
+// The whole course is described ONCE, as a floor height and a channel half-width
+// per lat, sampled off the un-carved landscape. `_cascadeReady` keeps that
+// sampling honest: until the table exists, the carve is a no-op, so building it
+// from _rawTerrain is not circular.
+function _cascadeCarve(theta, lat, h) {
+  if (!_cascadeReady) return h;
+  const C = CASCADE;
+  if (lat < C.latMouth || lat > C.latHead) return h;
+  let ds = theta * RF - C.s;
+  if (ds > CIRCUMFERENCE / 2) ds -= CIRCUMFERENCE;
+  if (ds < -CIRCUMFERENCE / 2) ds += CIRCUMFERENCE;
+  ds -= C.arcAt(lat);                                   // the outflow meanders
+  const half = C.halfAt(lat);
+  const reach = half + C.FEATHER;
+  if (ds < -reach || ds > reach) return h;
+  // Ramp the blend from a third of the channel width, not from its edge: a
+  // full-weight carve out to `half` gives the gorge two dead-vertical walls and
+  // it reads as a trench cut with a knife. Starting the ramp early turns the
+  // same numbers into a V-valley with a flat bed in the bottom of it.
+  const w = 1 - _smooth(half * 0.34, reach, ds < 0 ? -ds : ds);
+  const floor = C.floorAt(lat);
+  return h + (floor - h) * w;
+}
+
+const CASCADE = (function () {
+  const theta = CASCADE_DEG * DEG;
+  const nat = (lat) => _rawTerrain(theta, lat);        // _cascadeReady is still false
+
+  const latHead  = MTN_CREST + 5;                      // back of the hanging tarn
+  const latLip   = MTN_CREST;                          // the water leaves the rock here
+  const latToe   = MTN_LAT0 + 3;                       // where the fall lands
+  const latSill  = MTN_LAT0 - 4;                       // downstream lip of the basin
+  const latMouth = riverLat(theta) + riverHalf(theta) + 0.6;
+
+  // A shelf cut into the crest holds a small tarn; the plunge basin is a bowl
+  // set into the toe of the face. Both are sampled off the real mountain so the
+  // gorge fits the rock instead of hovering in it.
+  const hTarn = Math.min(nat(latLip), nat(latHead)) - 3.4;
+  const poolSurf = Math.min(nat(latToe), nat(latSill)) - 1.3;
+  const poolFloor = poolSurf - 3.4;
+  const fallH = hTarn - poolSurf;
+
+  const _lerp = (a, b, t) => a + (b - a) * t;
+  const seg = (lat) => (lat >= latLip ? 'tarn' : lat >= latToe ? 'fall' : lat >= latSill ? 'basin' : 'run');
+
+  function rawFloorAt(lat) {
+    switch (seg(lat)) {
+      case 'tarn': return hTarn;
+      case 'fall': {
+        // f^2.2 puts nearly all of the drop in the first few metres below the
+        // lip: a sheer face with a talus fan under it, not a uniform chute.
+        const f = _clamp01((lat - latToe) / (latLip - latToe));
+        return poolSurf + fallH * Math.pow(f, 2.2);
+      }
+      case 'basin': {
+        const f = _clamp01((lat - latSill) / (latToe - latSill));
+        const bowl = Math.sin(f * Math.PI);            // 0 at both rims, 1 mid-basin
+        return poolSurf - (poolSurf - poolFloor) * bowl;
+      }
+      default: {
+        const u = _clamp01((latSill - lat) / (latSill - latMouth));
+        return Math.min(_lerp(poolSurf, WATER_H, u * u * (3 - 2 * u)) - 0.55, nat(lat) - 1.3);
+      }
+    }
+  }
+  // Water surface. On the fall it clings to the rock; everywhere else it stands
+  // in the channel, and it meets WATER_H exactly at the river so the outflow and
+  // the river read as one body of water.
+  function rawSurfAt(lat) {
+    switch (seg(lat)) {
+      case 'tarn': return hTarn + 1.15;
+      case 'fall': return rawFloorAt(lat) + 0.30;
+      case 'basin': return poolSurf;
+      default: {
+        const u = _clamp01((latSill - lat) / (latSill - latMouth));
+        return _lerp(poolSurf, WATER_H, u * u * (3 - 2 * u));
+      }
+    }
+  }
+  function halfAt(lat) {
+    switch (seg(lat)) {
+      case 'tarn': return 17;
+      case 'fall': {
+        const f = _clamp01((lat - latToe) / (latLip - latToe));
+        return _lerp(15, 8.5, f);                      // narrow at the lip, flaring below
+      }
+      case 'basin': {
+        const f = _clamp01((lat - latSill) / (latToe - latSill));
+        return _lerp(6.5, 17, Math.sin(f * Math.PI * 0.5));
+      }
+      default: return 3.0 + 1.6 * _clamp01((latSill - lat) / 40);
+    }
+  }
+  // Arc offset of the channel centreline. The fall itself drops straight — a
+  // meandering waterfall is a contradiction — but below the basin the outflow
+  // has 45 m of open bank to cross, and running it dead down the fall line made
+  // it read as a concrete spillway rather than a stream.
+  function rawArcAt(lat) {
+    if (lat >= latSill) return 0;
+    const u = _clamp01((latSill - lat) / (latSill - latMouth));
+    return _smooth(0, 0.16, u) * (13.5 * Math.sin(u * 4.1) + 6.0 * Math.sin(u * 9.3 + 1.7));
+  }
+
+  // Bake the course into tables. The outflow floor is defined against the
+  // un-carved ground, so evaluating it lazily would re-enter _rawTerrain →
+  // _cascadeCarve → floorAt and recurse forever. Sampling once here also makes
+  // the runtime lookup a couple of array reads in the hottest function we have.
+  const STEP = 0.25;
+  const N = Math.ceil((latHead - latMouth) / STEP) + 1;
+  const tFloor = new Float64Array(N), tSurf = new Float64Array(N), tHalf = new Float64Array(N);
+  const tArc = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const lat = latMouth + i * STEP;
+    tFloor[i] = rawFloorAt(lat); tSurf[i] = rawSurfAt(lat);
+    tHalf[i] = halfAt(lat); tArc[i] = rawArcAt(lat);
+  }
+  const lookup = (tab) => (lat) => {
+    const f = (lat - latMouth) / STEP;
+    if (f <= 0) return tab[0];
+    if (f >= N - 1) return tab[N - 1];
+    const i = Math.floor(f), t = f - i;
+    return tab[i] * (1 - t) + tab[i + 1] * t;
+  };
+
+  return {
+    theta, thetaDeg: CASCADE_DEG, s: theta * RF, FEATHER: 22,
+    latHead, latLip, latToe, latSill, latMouth,
+    hTarn, poolSurf, poolFloor, fallH,
+    floorAt: lookup(tFloor), surfAt: lookup(tSurf), halfAt: lookup(tHalf),
+    arcAt: lookup(tArc), seg,
+  };
+})();
+_cascadeReady = true;
+if (typeof console !== 'undefined') {
+  console.log(`[layout] cascade @${CASCADE_DEG}°: ${CASCADE.fallH.toFixed(1)} m fall, ` +
+    `lip h=${CASCADE.hTarn.toFixed(1)} lat=${CASCADE.latLip}, pool h=${CASCADE.poolSurf.toFixed(1)}, ` +
+    `mouth lat=${CASCADE.latMouth.toFixed(1)}`);
 }
 
 // ── Road elevation profile ──────────────────────────────────────────────────
@@ -924,7 +1197,7 @@ const LANES = (function () {
         const f = k / nseg;
         th += (2.5 + (_layRng() - 0.5) * 7) / RF;       // gentle +theta drift
         let la = r0 + (target - r0) * (f * f * (3 - 2 * f)) + Math.sin(f * Math.PI * 1.4) * (_layRng() - 0.5) * 11;
-        la = _clamp(la, -(FLOOR_LAT - 9), FLOOR_LAT - 9);
+        la = _clamp(la, -(VALLEY_LAT + 2), VALLEY_LAT + 2);
         pts.push({ theta: th, lat: clampToBank(th, la, bank) });
       }
       if (_layRng() < 0.26) {                            // small cul-de-sac loop
@@ -999,5 +1272,6 @@ if (typeof window !== 'undefined') {
     STATIONS, terrainH, groundH, roadH, waterDepth, terrainSlope, sideProfile,
     FLAT_SPOTS, LANES, laneSample, addHeightPatch, CROSSINGS, TRIBS, RIVER_BRIDGES,
     ISLANDS, onIsland, KNOLLS, tribEdges, waterEdges, LAYOUT_CHECK,
+    mountainH: _mountainH, CASCADE,
   };
 }

@@ -414,20 +414,33 @@ function buildNPCs(scene, rng) {
       frameQuaternion(a.theta, a.quat);
       _nQy.setFromAxisAngle(_NAX_Y, a.yaw || 0); a.quat.multiply(_nQy);
       upAt(a.theta, _nUp); tangentAt(a.theta, _nTan);
-      a.vel.set((nrng() - 0.5) * 2.6, (nrng() - 0.5) * 2.6, (nrng() - 0.5) * 2.6);
-      a.vel.addScaledVector(_nUp, 1.0 + nrng() * 1.8);
-      a.vel.addScaledVector(_nTan, (nrng() - 0.5) * 3.0);   // tangential inertia shove
-      a.rot.set((nrng() - 0.5) * 7, (nrng() - 0.5) * 7, (nrng() - 0.5) * 7);   // wild tumble
+      // A small shove, not a launch. The RISE comes from the sustained lift in
+      // updateTumble — this only decides which way each body is facing and
+       // spinning when it leaves the ground, so nobody goes up in formation.
+      a.vel.set((nrng() - 0.5) * 1.1, (nrng() - 0.5) * 1.1, (nrng() - 0.5) * 1.1);
+      a.vel.addScaledVector(_nUp, 0.2 + nrng() * 0.5);
+      a.vel.addScaledVector(_nTan, (nrng() - 0.5) * 1.6);   // tangential inertia shove
+      a.rot.set((nrng() - 0.5) * 4.5, (nrng() - 0.5) * 4.5, (nrng() - 0.5) * 4.5);
       a.airborne = true; a.recover = 0;
     }
   }
 
   // ── tumble integration (mirrors props.js) ──────────────────────────────────
   let _rising = false;   // true only while spin is returning (gScale increasing)
+  let _lift = 0;         // 0..1, from GravitySystem.lift
   function updateTumble(a, dt, gScale, player) {
     worldToTorus(a.pos, _nT);
     upAt(_nT.theta, _nUp);
     a.vel.addScaledVector(_nUp, -G_FULL * gScale * dt);
+    // ── the lift ──
+    // Eased toward a terminal drift rather than applied as a force, so a long
+    // free-fall does not end with the whole population pinned to the glazing:
+    // they rise at a steady walking-pace crawl, tumbling, for as long as the
+    // spin is gone, then sink back as it returns.
+    if (_lift > 0) {
+      const vUp = a.vel.dot(_nUp);
+      a.vel.addScaledVector(_nUp, (LIFT_RISE * _lift - vUp) * Math.min(1, LIFT_EASE * _lift * dt));
+    }
     if (gScale < 0.06) a.vel.multiplyScalar(Math.max(0, 1 - 0.05 * dt));
     a.pos.addScaledVector(a.vel, dt);
 
@@ -645,9 +658,10 @@ function buildNPCs(scene, rng) {
   // ── per-frame driver ───────────────────────────────────────────────────────
   let prevG = 1;
   let _frameParity = 0;
-  function update(dt, gScale, zeroG, player) {
+  function update(dt, gScale, zeroG, player, lift = 0) {
     if (prevG >= NPC_KICK_G && gScale < NPC_KICK_G) kick();
     _rising = gScale > prevG + 1e-6;
+    _lift = lift;
     prevG = gScale;
     const tSec = performance.now() * 0.001;
     _frameParity ^= 1;   // stagger collision resolve: half the agents per frame

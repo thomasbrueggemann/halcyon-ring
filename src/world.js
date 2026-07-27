@@ -210,22 +210,31 @@ function makeTerrainMaterial(textures) {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec3 aSplat;
+        attribute vec3 aCliff;
         varying vec3 vSplat;
-        varying vec2 vTerrUv;`)
+        varying vec2 vTerrUv;
+        varying vec3 vCliff;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vSplat = aSplat;
-        vTerrUv = uv;`);
+        vTerrUv = uv;
+        vCliff = aCliff;`);
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D gMap, rMap, sMap, gNrm, rNrm, sNrm, dMap;
         uniform vec3 uSplatScale;
         varying vec3 vSplat;
-        varying vec2 vTerrUv;`)
+        varying vec2 vTerrUv;
+        varying vec3 vCliff;`)
       .replace('#include <map_fragment>', `
         vec3 w = vSplat / max(vSplat.x + vSplat.y + vSplat.z, 1e-4);
         vec2 uvG = vTerrUv * uSplatScale.x;
-        vec2 uvR = vTerrUv * uSplatScale.y;
+        // The terrain UV is the ground PLAN (arc, lat). On a 70° mountain face
+        // one metre of lat is three metres of rock, so a plan-mapped texture
+        // smears into vertical corduroy. aCliff.xy is the same point mapped as
+        // (arc, altitude) instead; blend to it by how steep the face is, and the
+        // stone keeps its grain all the way up.
+        vec2 uvR = mix(vTerrUv, vCliff.xy, vCliff.z) * uSplatScale.y;
         vec2 uvS = vTerrUv * uSplatScale.z;
         vec3 albedo = texture2D(gMap, uvG).rgb * w.x
                     + texture2D(rMap, uvR).rgb * w.y
@@ -246,7 +255,7 @@ function makeTerrainMaterial(textures) {
         mapN.xy *= normalScale;
         normal = normalize(tbn * mapN);`);
   };
-  mat.customProgramCacheKey = () => 'terrain-splat-v1';
+  mat.customProgramCacheKey = () => 'terrain-splat-v2';
   return mat;
 }
 
@@ -329,7 +338,7 @@ function buildWorld(scene, textures, colliders) {
   // One height grid, sampled once; slope, normals, splat weights and concavity
   // shading are all derived from it rather than re-querying terrainH (which
   // would otherwise cost ~450k extra evaluations at load).
-  const TSEG = 1600, TNP = 56;
+  const TSEG = 1600, TNP = 80;   // 190 m across the tube ≈ 2.4 m per lat step
   {
     const H = new Float32Array((TSEG + 1) * TNP);
     const latOf = (i) => -FLOOR_LAT + (2 * FLOOR_LAT) * (i / (TNP - 1));
@@ -345,6 +354,7 @@ function buildWorld(scene, textures, colliders) {
     const uvs = new Float32Array((TSEG + 1) * TNP * 2);
     const colors = new Float32Array((TSEG + 1) * TNP * 3);
     const splat = new Float32Array((TSEG + 1) * TNP * 3);
+    const cliff = new Float32Array((TSEG + 1) * TNP * 3);
     const p = new THREE.Vector3();
 
     for (let s = 0; s <= TSEG; s++) {
@@ -373,10 +383,18 @@ function buildWorld(scene, textures, colliders) {
         let sand = 1 - _sstep(0.0, 4.2 + jit * 1.4, outside);         // bed + beach
         if (onIsland(theta, lat)) sand = Math.max(sand, 0.4);         // island shingle
         let rock = _sstep(0.62 + jit * 0.06, 1.05, slope);           // scree on steep faces
-        rock = Math.max(rock, _sstep(57 + jit * 2.5, 62, alat));      // bare rock right up at the glass
+        // The rim goes bare above the tree line. Keyed off ALTITUDE, not lat:
+        // the mountain foot wanders ±8 m, and a fixed lat band would run across
+        // the headlands and leave rock lying in the bays between them.
+        rock = Math.max(rock, _sstep(15 + jit * 2.0, 30, h) * _sstep(MTN_LAT0 - 8, MTN_LAT0, alat));
         rock *= 1 - sand;
         const grass = Math.max(0, 1 - rock - sand);
         splat[k * 3] = grass; splat[k * 3 + 1] = rock; splat[k * 3 + 2] = sand;
+
+        // elevation-mapped UV for the rock layer, plus how far to trust it
+        cliff[k * 3] = theta * RF;
+        cliff[k * 3 + 1] = h;
+        cliff[k * 3 + 2] = _sstep(0.5, 1.6, slope);
 
         // ── baked concavity shading ──
         // Compare the point to a wider neighbourhood: sitting in a hollow means
@@ -394,9 +412,16 @@ function buildWorld(scene, textures, colliders) {
         // damp everything slightly under the trees' preferred belt so the
         // valley sides don't read as uniformly lit cardboard
         const tint = 0.94 + 0.06 * Math.sin(theta * 7.0 + lat * 0.05);
-        colors[k * 3] = ao * tint;
-        colors[k * 3 + 1] = ao * tint;
-        colors[k * 3 + 2] = ao * tint * 0.99;
+        // Snowline. Rather than a fourth splat layer, brighten the (already
+        // rock) peaks toward a cold white — vertex colour multiplies straight
+        // into the albedo, so a factor >1 reads as snow lying on the crags.
+        // It only bites where the ground is genuinely high, so the sheltered
+        // gullies stay bare and the caps break up along the ridgeline.
+        const snow = _sstep(44, 64, h) * (1 - _sstep(1.5, 2.1, slope));
+        const r = ao * tint * (1 + snow * 0.95);
+        colors[k * 3] = r;
+        colors[k * 3 + 1] = r * (1 + snow * 0.04);
+        colors[k * 3 + 2] = r * (0.99 + snow * 0.12);
       }
     }
 
@@ -412,6 +437,7 @@ function buildWorld(scene, textures, colliders) {
     geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.setAttribute('aSplat', new THREE.BufferAttribute(splat, 3));
+    geo.setAttribute('aCliff', new THREE.BufferAttribute(cliff, 3));
     geo.setIndex(indices);
     geo.computeVertexNormals();
 
@@ -798,6 +824,176 @@ function buildWorld(scene, textures, colliders) {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // The Cascade
+  // ══════════════════════════════════════════════════════════════════════════
+  // One continuous body of water from the hanging tarn on the crest, over the
+  // lip, down the face, into the plunge basin and out along the run to the
+  // river. It is drawn as a single ribbon down the gorge that layout.js carved,
+  // so the sheet and the rock are the same shape by construction. Each vertex
+  // carries how steep the water is there, and the shader uses that to scroll
+  // faster and go white — the fall foams, the tarn does not.
+  const cascadeMat = (function () {
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, normalMap: textures.waterN1,
+      roughness: 0.14, metalness: 0.02, envMapIntensity: 0.9,
+      transparent: true, side: THREE.DoubleSide, depthWrite: false,
+    });
+    const uniforms = { uTime: { value: 0 }, wN1: { value: textures.waterN1 }, wN2: { value: textures.waterN2 } };
+    mat.userData.uniforms = uniforms;
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+          attribute float aFlow;
+          varying float vFlow;
+          varying vec2 vCUv;
+          varying vec3 vCT, vCB, vCN;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          vFlow = aFlow;
+          vCUv = uv;
+          vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
+          vCN = normalize(vec3(-wp.x, 0.0, -wp.z));
+          vCB = vec3(0.0, 1.0, 0.0);
+          vCT = normalize(cross(vCB, vCN));`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          uniform float uTime;
+          uniform sampler2D wN1, wN2;
+          varying float vFlow;
+          varying vec2 vCUv;
+          varying vec3 vCT, vCB, vCN;`)
+        .replace('#include <map_fragment>', `
+          // streaks stretched ALONG the flow, scrolling at the local speed
+          float sp = 1.5 + vFlow * 22.0;
+          float streak = texture2D(wN1, vec2(vCUv.x * 2.4, vCUv.y * 0.09 - uTime * sp * 0.02)).g;
+          float froth  = texture2D(wN2, vec2(vCUv.x * 5.0, vCUv.y * 0.22 - uTime * sp * 0.05)).r;
+          vec3 calm = vec3(0.30, 0.56, 0.60);
+          vec3 white = vec3(0.93, 0.97, 1.00);
+          float f = clamp(vFlow * 1.5 + froth * vFlow * 1.6 + streak * 0.25, 0.0, 1.0);
+          diffuseColor.rgb *= mix(calm, white, f);
+          diffuseColor.a *= mix(0.72, 0.97, f);`)
+        .replace('#include <normal_fragment_maps>', `
+          vec2 q1 = vec2(vCUv.x * 0.6, vCUv.y * 0.10 - uTime * (0.05 + vFlow * 0.55));
+          vec2 q2 = vec2(vCUv.x * 1.7, vCUv.y * 0.26 - uTime * (0.09 + vFlow * 1.10));
+          vec3 n1 = texture2D(wN1, q1).xyz * 2.0 - 1.0;
+          vec3 n2 = texture2D(wN2, q2).xyz * 2.0 - 1.0;
+          vec3 nl = normalize(vec3(n1.xy * 0.42 + n2.xy * 0.34, 1.0));
+          normal = normalize(nl.x * vCT + nl.y * vCB + nl.z * vCN);`);
+    };
+    mat.customProgramCacheKey = () => 'cascade-v1';
+    return mat;
+  })();
+  let mist = null;
+  {
+    const C = CASCADE;
+    const N = 420;
+    const pos = [], uv = [], flow = [], idx = [];
+    const v = new THREE.Vector3(), prev = new THREE.Vector3();
+    let along = 0;
+    // water is narrower than the gorge it runs in — the notch keeps dry rock
+    // shoulders, which is what stops the fall reading as a filled trench
+    const fillOf = { tarn: 0.80, fall: 0.72, basin: 0.85, run: 0.68 };
+    for (let k = 0; k <= N; k++) {
+      const lat = C.latHead + (C.latMouth - C.latHead) * (k / N);
+      const h = C.surfAt(lat);
+      const mid = C.theta + C.arcAt(lat) / RF;
+      const hw = C.halfAt(lat) * fillOf[C.seg(lat)];
+      torusPosition(mid, lat, h, v);
+      if (k > 0) along += prev.distanceTo(v);
+      prev.copy(v);
+      // local steepness → how fast and how white the water runs here
+      const dLat = (C.latMouth - C.latHead) / N;
+      const grade = Math.abs(C.surfAt(lat + dLat) - h) / Math.abs(dLat);
+      const fl = Math.min(1, grade / 3.0);
+      for (const sgn of [-1, 1]) {
+        torusPosition(mid + (sgn * hw) / RF, lat, h, v);
+        pos.push(v.x, v.y, v.z);
+        uv.push(sgn * 0.5 + 0.5, along);
+        flow.push(fl);
+      }
+    }
+    for (let k = 0; k < N; k++) {
+      const a = k * 2, b = (k + 1) * 2;
+      idx.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setAttribute('aFlow', new THREE.Float32BufferAttribute(flow, 1));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const falls = new THREE.Mesh(g, cascadeMat);
+    falls.renderOrder = 3;
+    falls.frustumCulled = false;
+    world.add(falls);
+
+    // ── mist at the plunge basin ──
+    // A billowing cloud where the fall lands. Points rather than billboards:
+    // there are ~500 of them, they only need to be soft and bright, and this
+    // costs one draw call.
+    {
+      const c = document.createElement('canvas');
+      c.width = c.height = 32;
+      const g2 = c.getContext('2d');
+      const rad = g2.createRadialGradient(16, 16, 0, 16, 16, 16);
+      rad.addColorStop(0, 'rgba(255,255,255,0.9)');
+      rad.addColorStop(0.45, 'rgba(235,246,250,0.35)');
+      rad.addColorStop(1, 'rgba(220,240,250,0)');
+      g2.fillStyle = rad; g2.fillRect(0, 0, 32, 32);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+
+      const M = 1600;
+      const base = new Float32Array(M * 4);       // (arc, lat, phase, rise) seeds
+      const positions = new Float32Array(M * 3);
+      const rngM = mulberry32(0x0ca5cade);
+      const toeLat = CASCADE.latToe, poolH = CASCADE.poolSurf;
+      for (let i = 0; i < M; i++) {
+        // Clustered on the impact point and thinning outward — a uniform box of
+        // motes reads as two symmetric cotton-wool wings, which is exactly what
+        // a plunge pool does not look like.
+        const r = Math.pow(rngM(), 1.7);
+        const ang = rngM() * Math.PI * 2;
+        base[i * 4] = Math.cos(ang) * r * 11;
+        base[i * 4 + 1] = toeLat - 1.5 - Math.abs(Math.sin(ang)) * r * 9;
+        base[i * 4 + 2] = rngM();
+        base[i * 4 + 3] = 5 + rngM() * 16;                        // how high this one gets
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const pmat = new THREE.PointsMaterial({
+        map: tex, color: 0xeaf4f8, size: 1.15, transparent: true, opacity: 0.2,
+        depthWrite: false, sizeAttenuation: true, blending: THREE.NormalBlending,
+      });
+      const pts = new THREE.Points(geo, pmat);
+      pts.frustumCulled = false;
+      pts.renderOrder = 4;
+      world.add(pts);
+
+      const _mp = new THREE.Vector3();
+      mist = {
+        t: 0,
+        update(dt) {
+          this.t += dt;
+          for (let i = 0; i < M; i++) {
+            // each mote boils up its own distance, spreading and drifting
+            // downstream as it goes, then recycles at the water line
+            const ph = (base[i * 4 + 2] + this.t * 0.075) % 1;
+            const spread = 0.5 + ph * 1.3;
+            const rise = ph * base[i * 4 + 3];
+            const lat = base[i * 4 + 1] - ph * 7;
+            const arc = base[i * 4] * spread;
+            torusPosition(CASCADE.theta + arc / RF, lat, poolH + rise, _mp);
+            positions[i * 3] = _mp.x; positions[i * 3 + 1] = _mp.y; positions[i * 3 + 2] = _mp.z;
+          }
+          geo.attributes.position.needsUpdate = true;
+        },
+      };
+      mist.update(0);
+    }
+  }
+
   // ── Culvert headwalls where each tributary passes under the road ──
   {
     const geos = [];
@@ -916,7 +1112,11 @@ function buildWorld(scene, textures, colliders) {
   }
 
   return {
-    group: world, sweepProfile, tubeArc, waterMat,
-    update(t) { waterMat.userData.uniforms.uTime.value = t; },
+    group: world, sweepProfile, tubeArc, waterMat, cascadeMat,
+    update(t, dt) {
+      waterMat.userData.uniforms.uTime.value = t;
+      cascadeMat.userData.uniforms.uTime.value = t;
+      if (mist) mist.update(dt || 0);
+    },
   };
 }

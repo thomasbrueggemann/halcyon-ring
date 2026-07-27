@@ -19,6 +19,31 @@ class GravitySystem {
 
   get zeroG() { return this.gravityScale < 0.06; }
 
+  // How strongly loose things are being carried UP off the floor, 0..1.
+  //
+  // Physically, a habitat that stops spinning does not throw anything anywhere:
+  // people just keep the tangential velocity they already had and coast. That
+  // is invisible — everyone drifts along with the scenery and nothing looks
+  // wrong. What actually happens in the moment is that the floor stops pushing
+  // back, and the residual air currents, the shove of standing up, and every
+  // small vertical impulse that gravity used to cancel are suddenly unopposed.
+  // So the readable version — and the one this drives — is: as spin falls away,
+  // everything unsecured rises off the ground together, slowly.
+  //
+  // Ramped off gravityScale rather than off the mode, so it fades in over the
+  // whole spin-down and back out over the spin-up with no steps. It is also
+  // asymmetric: it comes on quickly and lets go SLOWLY, so a ring full of
+  // floating people settles back down over several seconds instead of the
+  // whole population being dropped the instant the flywheel catches.
+  get lift() { return this.liftSmoothed; }
+
+  _updateLift(dt) {
+    let t = (LIFT_ONSET_G - this.gravityScale) / LIFT_ONSET_G;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const k = t > this.liftSmoothed ? LIFT_ATTACK : LIFT_RELEASE;
+    this.liftSmoothed += (t - this.liftSmoothed) * Math.min(1, k * dt);
+  }
+
   triggerFailure() {
     if (this.mode === 'stable' && !this.stabilized) {
       this.mode = 'spindown';
