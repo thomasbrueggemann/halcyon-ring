@@ -2,12 +2,17 @@
 // Obstacles live in the (s, lat) plane where s = theta * RF is arc length.
 // Boxes are axis-aligned in that plane; cylinders are radial.
 
-const BUCKETS = 256;
+// One bucket per ~6 m of arc. It used to be 256 (23 m each), which was fine
+// when the ring held a few thousand obstacles; a forested ring registers tens
+// of thousands of tree trunks, and `resolve` scans three whole buckets on every
+// call, for the player and for every NPC, every frame.
+const BUCKETS = 1024;
 const bucketArc = CIRCUMFERENCE / BUCKETS;
 
 class Colliders {
   constructor() {
     this.buckets = Array.from({ length: BUCKETS }, () => []);
+    this._stamp = 0;                 // de-dup counter for resolve(), see below
   }
 
   _bucketOf(s) {
@@ -44,7 +49,8 @@ class Colliders {
 
   // Every obstacle that could overlap arc position `s`. Registration covers a
   // whole obstacle's extent (plus 2 m) in every bucket it touches, so the one
-  // bucket containing `s` is sufficient and needs no de-duplication.
+  // bucket containing `s` is sufficient — a point query needs no de-duplication
+  // because it reads exactly one bucket.
   bucketAt(s) {
     return this.buckets[this._bucketOf(((s % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE)];
   }
@@ -61,12 +67,25 @@ class Colliders {
     let curS = ((s % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE;
     let curL = lat;
     let totS = 0, totL = 0, any = false;
+    // How far either side of our own bucket we have to look. Registration
+    // already spreads an obstacle over its extent + 2 m, so the only thing left
+    // to cover is the QUERY circle: a 9 m building-footprint test has to see
+    // obstacles 9 m away, which is more than one 6 m bucket. Deriving the span
+    // from the radius keeps that correct whatever BUCKETS is set to.
+    const span = Math.max(1, Math.ceil(radius / bucketArc));
     for (let iter = 0; iter < 3; iter++) {
       const b = this._bucketOf(curS);
+      // An obstacle wider than one bucket is registered in several of them, and
+      // we are about to read several — so stamp each entry as it is handled and
+      // skip repeats, or a house counts its own push-out three times over and
+      // fires the player away from the wall.
+      const stamp = ++this._stamp;
       let ds = 0, dlat = 0, hit = false;
-      for (let k = -1; k <= 1; k++) {
+      for (let k = -span; k <= span; k++) {
         const bucket = this.buckets[(b + k + BUCKETS) % BUCKETS];
         for (const e of bucket) {
+          if (e._seen === stamp) continue;
+          e._seen = stamp;
           if (h > e.top) continue;   // above the obstacle: walk over it (roofs, decks)
           let dS = curS - e.s;
           if (dS > CIRCUMFERENCE / 2) dS -= CIRCUMFERENCE;

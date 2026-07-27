@@ -70,7 +70,41 @@ function buildVegetation(scene, textures, colliders, rng) {
     ]) },
   ]);
 
+  // ── Low-detail variants, for the mass fill ──
+  // The ring is 5.9 km around and 190 m wide. Covering that at woodland density
+  // takes tens of thousands of trees and a 730-triangle oak does not survive
+  // those numbers. These carry a quarter of the geometry; past ~40 m — which is
+  // where nearly all of them are — the silhouette is what reads, not the facets.
+  const loSph = (x, y, z, r, sy = 1) => {
+    const g = new THREE.SphereGeometry(r, 6, 5);
+    g.scale(1, sy, 1); g.translate(x, y, z);
+    return g;
+  };
+  const loCone = (y, r, h) => {
+    const g = new THREE.ConeGeometry(r, h, 6);
+    g.translate(0, y, 0);
+    return g;
+  };
+  const loTrunk = (h, r0, r1) => {
+    const g = new THREE.CylinderGeometry(r0, r1, h, 5);
+    g.translate(0, h / 2, 0);
+    return g;
+  };
+  const oakLoGeo = treeGeo([
+    { geo: loTrunk(3.4, 0.28, 0.45) },
+    { geo: mergeGeometries([
+      loSph(0, 4.7, 0, 2.7), loSph(1.4, 3.9, 0.7, 1.9), loSph(-1.2, 4.2, -0.8, 1.8),
+    ]) },
+  ]);
+  const pineLoGeo = treeGeo([
+    { geo: loTrunk(2.4, 0.22, 0.38) },
+    { geo: mergeGeometries([
+      loCone(3.3, 2.4, 3.0), loCone(4.7, 1.85, 2.6), loCone(5.9, 1.25, 2.2), loCone(6.9, 0.62, 1.7),
+    ]) },
+  ]);
+
   const oaks = [], poplars = [], pines = [], bushes = [], tufts = [], rocks = [], flowers = [], reeds = [];
+  const oaksLo = [], pinesLo = [], scrub = [];
 
   // Bucketed lane centerline points, for cheap build-time proximity tests.
   const _laneCell = 4;
@@ -306,6 +340,163 @@ function buildVegetation(scene, textures, colliders, rng) {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  // The woodland fill — everything above plants set-pieces; this covers the ring
+  // ══════════════════════════════════════════════════════════════════════════
+  // Everything before this point plants by district, by lane or by landmark,
+  // which leaves the ground BETWEEN those things bare. On a 190 m-wide floor you
+  // are looking across half a kilometre of it at any moment, and bare reads as
+  // unfinished lawn, not as countryside. This pass sweeps the whole ring on a
+  // jittered grid and fills whatever the set-pieces did not claim.
+
+  // A wrapped 2-D value-noise field on the (arc-metre, lat-metre) plane. The
+  // wrap period is an exact divisor of the circumference, so the pattern closes
+  // on itself at 0°/360° with no seam.
+  function noiseField(cellWanted, seed) {
+    const N = Math.max(4, Math.round(CIRCUMFERENCE / cellWanted));
+    const cell = CIRCUMFERENCE / N;
+    const hash = (i, j) => {
+      let n = Math.imul(((i % N) + N) % N, 374761393) ^ Math.imul(j, 668265263) ^ seed;
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+    };
+    return (s, lat) => {
+      const x = s / cell, y = lat / cell;
+      const i = Math.floor(x), j = Math.floor(y);
+      const fx = x - i, fy = y - j;
+      const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+      return (hash(i, j) * (1 - u) + hash(i + 1, j) * u) * (1 - v)
+           + (hash(i, j + 1) * (1 - u) + hash(i + 1, j + 1) * u) * v;
+    };
+  }
+  // Three octaves: the big one decides which side of the valley is forest, the
+  // middle one cuts glades into it, the small one ragged-edges the boundaries.
+  // An even coin flip per cell would give uniform dust — what makes a valley
+  // read as wooded is contrast between closed canopy and open meadow.
+  const _nseed = () => (rng() * 4294967296) | 0;
+  const nf1 = noiseField(240, _nseed()), nf2 = noiseField(96, _nseed()), nf3 = noiseField(37, _nseed());
+  const woodMask = (s, lat) => 0.54 * nf1(s, lat) + 0.31 * nf2(s, lat) + 0.15 * nf3(s, lat);
+
+  // How wooded each district wants to be. Smoothed over ±9° afterwards: a
+  // district boundary is an administrative line, and a forest that stops dead
+  // on one reads as a fence.
+  const CANOPY_KIND = {
+    park: 1.35, water: 1.25, orchard: 1.05, houses: 0.88, science: 0.85,
+    market: 0.75, plaza: 0.68, industry: 0.72, farm: 0.46,
+  };
+  const canopyDeg = new Float32Array(360);
+  {
+    const raw = new Float32Array(360);
+    for (let d = 0; d < 360; d++) raw[d] = CANOPY_KIND[districtAt(d).kind] || 0.7;
+    const R = 9;
+    for (let d = 0; d < 360; d++) {
+      let acc = 0;
+      for (let k = -R; k <= R; k++) acc += raw[(d + k + 360) % 360];
+      canopyDeg[d] = acc / (2 * R + 1);
+    }
+  }
+  // Across the tube: the valley floor is settled ground (road, river, homes,
+  // fields) so woods only take hold once you are clear of it, thicken up the
+  // sides, and stop at the tree line where the rim turns to rock.
+  const latCanopy = (lat) => {
+    const a = Math.abs(lat);
+    return (0.50 + 0.50 * _smooth(6, 26, a)) * (1 - _smooth(MTN_LAT0 - 7, MTN_LAT0 + 11, a));
+  };
+  const canopyAt = (theta, lat) => {
+    const w = canopyDeg[Math.floor((((theta / DEG) % 360) + 360) % 360)] * latCanopy(lat);
+    if (w <= 0.01) return 0;
+    const t = 0.78 - 0.62 * w;                       // wooded ground lowers the bar
+    return _smooth(t, t + 0.24, woodMask(theta * RF, lat)) * Math.min(1, 0.45 + 0.9 * w);
+  };
+
+  const FILL_LAT = MTN_LAT0 + 11;
+  {
+    const STEP = 4.6;
+    for (let s = 0; s < CIRCUMFERENCE; s += STEP) {
+      for (let lat = -FILL_LAT; lat <= FILL_LAT; lat += STEP) {
+        const th = (s + (rng() - 0.5) * STEP * 1.7) / RF;
+        const la = lat + (rng() - 0.5) * STEP * 1.7;
+        if (Math.abs(la) > FILL_LAT) continue;
+        if (rng() > canopyAt(th, la)) continue;
+        const r = rng();
+        const list = r < 0.44 ? pinesLo : r < 0.88 ? oaksLo : poplars;
+        treeWithCollider(list, th, la, 0.75 + rng() * 0.8, 1.9);
+      }
+    }
+    // Understory, on a half-offset grid so it interleaves with the canopy
+    // rather than stacking under it. Note the large constant term: the ground
+    // BETWEEN the woods is gorse, bracken and long grass, not mown lawn, and
+    // that open ground is most of the ring. Scrub goes down in ones and twos
+    // because a single blob every 20 m reads as litter, while a clump reads as
+    // a plant.
+    for (let s = STEP / 2; s < CIRCUMFERENCE; s += STEP) {
+      for (let lat = -FILL_LAT + STEP / 2; lat <= FILL_LAT; lat += STEP) {
+        const th = (s + (rng() - 0.5) * STEP * 1.7) / RF;
+        const la = lat + (rng() - 0.5) * STEP * 1.7;
+        if (Math.abs(la) > FILL_LAT) continue;
+        const p = canopyAt(th, la);
+        if (rng() > 0.38 + 0.45 * p) continue;
+        const n = 1 + Math.floor(rng() * 3);
+        for (let i = 0; i < n; i++) {
+          tryPlace(scrub, th + ((rng() - 0.5) * 3.4) / RF, la + (rng() - 0.5) * 3.4,
+            0.42 + rng() * 0.72, 0.85);
+        }
+        // a stone or two in the open, where there is no canopy to hide the ground
+        if (rng() < 0.16 * (1 - p)) {
+          tryPlace(rocks, th + ((rng() - 0.5) * 3.4) / RF, la + (rng() - 0.5) * 3.4,
+            0.4 + rng() * 0.9, 0.7);
+        }
+      }
+    }
+  }
+
+  // ── The scrub belt under the crags ──
+  // Above the tree line and below the bare rock there is a band of low,
+  // wind-cut growth. siteOK deliberately refuses to plant a tree up there, so
+  // without its own pass the hillside above the fields is a bald sheet of green
+  // half a kilometre wide — which is exactly what you see from across the ring.
+  {
+    const beltOK = (theta, lat) => {
+      if (waterDepth(theta, lat) > 0.02) return false;
+      if (inLake(theta, lat, 1.5)) return false;
+      if (inBore(theta, lat)) return false;
+      if (terrainSlope(theta, lat) > 2.0) return false;   // sheer face: nothing roots
+      return !colliders.resolve(theta * RF, lat, 0.4, 0.9);
+    };
+    for (let s = 0; s < CIRCUMFERENCE; s += 3.2) {
+      for (const side of [-1, 1]) {
+        if (rng() < 0.42) continue;
+        const th = (s + (rng() - 0.5) * 3.2) / RF;
+        const la = side * (MTN_LAT0 - 9 + rng() * 27);
+        if (!beltOK(th, la)) continue;
+        scrub.push({ theta: th, lat: la, yaw: rng() * Math.PI * 2, scale: 0.4 + rng() * 0.6 });
+        // the last stragglers of the tree line: stunted conifers among the scrub
+        if (rng() < 0.12 && Math.abs(la) < MTN_LAT0 + 8) {
+          treeWithCollider(pinesLo, th + (1.5 + rng() * 2) / RF, la, 0.45 + rng() * 0.35, 1.4);
+        }
+      }
+    }
+  }
+
+  // ── Farm windbreaks ──
+  // The Agricultural Belt is the emptiest 42° of the ring by design — it is
+  // fields — but a field system without hedgerows is just a lawn. Rows of
+  // poplars running across the belt give it the grain of farmed land, and they
+  // are what the eye reads at a kilometre. siteOK keeps them off the
+  // carriageway, out of the river and clear of the guideway.
+  {
+    const d = DISTRICTS.find(x => x.kind === 'farm');
+    let from = d.from, to = d.to; if (to <= from) to += 360;
+    for (let deg = from + 3; deg < to - 3; deg += 4.0 + rng() * 3.4) {
+      const theta = (((deg % 360) + 360) % 360) * DEG;
+      for (let lat = -VALLEY_LAT + 4; lat < VALLEY_LAT - 4; lat += 2.4) {
+        if (rng() < 0.2) continue;
+        treeWithCollider(poplars, theta + ((rng() - 0.5) * 1.6) / RF,
+          lat + (rng() - 0.5) * 1.2, 0.8 + rng() * 0.5, 1.4);
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // Landmarks — the things you don't expect to find twice
   // ══════════════════════════════════════════════════════════════════════════
 
@@ -441,15 +632,34 @@ function buildVegetation(scene, textures, colliders, rng) {
     logs.push({ theta, lat, yaw: rng() * Math.PI * 2, scale: 0.7 + rng() * 0.9 });
   }
 
-  // grass tufts sprinkled through green districts
-  const green = DISTRICTS.filter(d => ['park', 'orchard', 'houses', 'plaza', 'water', 'farm'].includes(d.kind));
-  for (let i = 0; i < 14000; i++) {
-    const d = green[Math.floor(rng() * green.length)];
-    const theta = inArc(d.from, d.to, rng);
-    const lat = (rng() - 0.5) * 94;
-    if (!siteOK(theta, lat)) continue;
-    if (_nearLane(theta, lat, 2)) continue;
-    tufts.push({ theta, lat, yaw: rng() * Math.PI, scale: 0.42 + rng() * 0.5 });
+  // ── Ground cover ──
+  // Tufts used to be 14 000 independent draws across the green districts, which
+  // is one tuft per ~80 m²: from standing height that is bare grass with a
+  // speck on it every few paces. Real ground cover grows in patches, so this
+  // seeds clumps instead — a clump reads as a plant where a lone tuft reads as
+  // a speck — and it sweeps the WHOLE ring, not just the districts someone
+  // once flagged 'green'. A tuft is two crossed quads, so the extra thousands
+  // cost almost nothing.
+  {
+    const CSTEP = 8.0;
+    for (let s = 0; s < CIRCUMFERENCE; s += CSTEP) {
+      for (let lat = -(MTN_LAT0 + 6); lat <= MTN_LAT0 + 6; lat += CSTEP) {
+        if (rng() < 0.2) continue;
+        const th = (s + (rng() - 0.5) * CSTEP) / RF;
+        const la = lat + (rng() - 0.5) * CSTEP;
+        if (!siteOK(th, la)) continue;
+        if (_nearLane(th, la, 2)) continue;
+        const n = 5 + Math.floor(rng() * 8);
+        const spread = 1.6 + rng() * 2.2;
+        for (let i = 0; i < n; i++) {
+          tufts.push({
+            theta: th + ((rng() - 0.5) * 2 * spread) / RF,
+            lat: la + (rng() - 0.5) * 2 * spread,
+            yaw: rng() * Math.PI, scale: 0.5 + rng() * 0.7,
+          });
+        }
+      }
+    }
   }
 
   // flower beds: clustered warm-colored tufts near civic areas and yards
@@ -471,19 +681,34 @@ function buildVegetation(scene, textures, colliders, rng) {
   }
 
   // ── build instanced meshes ──
+  // Split every scatter into arc sectors. A single ring-wide InstancedMesh has
+  // a bounding sphere the size of the torus, so it never fails the frustum test
+  // and the GPU walks all of its instances whichever way you are facing — twice,
+  // counting the shadow pass. Per-sector meshes cull for real; the cost is a
+  // few dozen extra draw calls, which is nothing next to the triangles saved.
+  const VEG_SECTORS = 24;
+  const SECTOR_DEG = 360 / VEG_SECTORS;
   function addInstanced(geo, mats, list, { shadow = true, tintFn = null } = {}) {
     if (!list.length) return;
-    const mesh = new THREE.InstancedMesh(geo, mats, list.length);
-    list.forEach((pl, i) => {
-      // sit on the terrain, sunk 0.15 m so trunks/tufts meet the ground cleanly
-      placementMatrix(pl.theta, pl.lat, groundH(pl.theta, pl.lat, Infinity) - 0.15, pl.yaw, pl.scale, _vegM);
-      mesh.setMatrixAt(i, _vegM);
-      if (tintFn) mesh.setColorAt(i, tintFn(i));
-    });
-    if (tintFn) mesh.instanceColor.needsUpdate = true;
-    mesh.castShadow = shadow;
-    mesh.receiveShadow = false;
-    veg.add(mesh);
+    const sectors = Array.from({ length: VEG_SECTORS }, () => []);
+    for (const pl of list) {
+      const deg = (((pl.theta / DEG) % 360) + 360) % 360;
+      sectors[Math.min(VEG_SECTORS - 1, Math.floor(deg / SECTOR_DEG))].push(pl);
+    }
+    for (const sector of sectors) {
+      if (!sector.length) continue;
+      const mesh = new THREE.InstancedMesh(geo, mats, sector.length);
+      sector.forEach((pl, i) => {
+        // sit on the terrain, sunk 0.15 m so trunks/tufts meet the ground cleanly
+        placementMatrix(pl.theta, pl.lat, groundH(pl.theta, pl.lat, Infinity) - 0.15, pl.yaw, pl.scale, _vegM);
+        mesh.setMatrixAt(i, _vegM);
+        if (tintFn) mesh.setColorAt(i, tintFn(i));
+      });
+      if (tintFn) mesh.instanceColor.needsUpdate = true;
+      mesh.castShadow = shadow;
+      mesh.receiveShadow = false;
+      veg.add(mesh);
+    }
   }
 
   const leafTint = () => _c.setHSL(0.25 + rng() * 0.08, 0.34 + rng() * 0.22, 0.28 + rng() * 0.14).clone();
@@ -491,10 +716,27 @@ function buildVegetation(scene, textures, colliders, rng) {
   addInstanced(poplarGeo, [barkMat, leafMat], poplars, { tintFn: leafTint });
   addInstanced(pineGeo, [barkMat, pineMat], pines);
 
+  addInstanced(oakLoGeo, [barkMat, leafMat], oaksLo, { tintFn: leafTint });
+  addInstanced(pineLoGeo, [barkMat, pineMat], pinesLo);
+
   const bushGeo = new THREE.SphereGeometry(0.8, 9, 7);
   bushGeo.scale(1, 0.75, 1);
   bushGeo.translate(0, 0.5, 0);
   addInstanced(bushGeo, leafMat, bushes, { tintFn: leafTint });
+
+  // Understory scrub: cheaper than a bush, and tinted over a much wider range —
+  // gorse, bracken and heather are not all the same green, and a hillside
+  // covered in one green is a hillside painted rather than planted.
+  const scrubGeo = new THREE.SphereGeometry(0.8, 7, 5);
+  scrubGeo.scale(1, 0.72, 1);
+  scrubGeo.translate(0, 0.34, 0);
+  const scrubTint = () => _c.setHSL(0.19 + rng() * 0.14, 0.22 + rng() * 0.3, 0.22 + rng() * 0.16).clone();
+  // per-axis jitter as well as size: uniformly scaled squashed spheres all read
+  // as the same green disc, which is worse than no scrub at all
+  addInstanced(scrubGeo, leafMat, scrub.map(b => ({
+    ...b, scale: new THREE.Vector3(
+      b.scale * (0.75 + rng() * 0.55), b.scale * (0.7 + rng() * 0.75), b.scale * (0.75 + rng() * 0.55)),
+  })), { shadow: false, tintFn: scrubTint });
 
   const tuftPlane = new THREE.PlaneGeometry(1.1, 0.7);
   tuftPlane.translate(0, 0.35, 0);
