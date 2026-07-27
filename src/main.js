@@ -79,8 +79,12 @@ const textures = makeTextures();
 const colliders = new Colliders();
 const sky = buildSky(scene);
 const world = buildWorld(scene, textures, colliders);
-const { stations } = buildCity(scene, textures, colliders, rng);
-const transit = buildTransit(scene, colliders, rng);
+const city = buildCity(scene, textures, colliders, rng);
+const { stations } = city;
+// The guideway is planned last of the three: it re-routes itself around the
+// buildings the city just put up (and bores through the ones it cannot dodge),
+// which is why it needs a handle on the city.
+const transit = buildTransit(scene, colliders, rng, city);
 buildVegetation(scene, textures, colliders, rng);
 const props = buildProps(scene, textures, rng);
 const hydro = buildHydro(scene, rng);

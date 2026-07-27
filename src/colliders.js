@@ -28,16 +28,25 @@ class Colliders {
   // Axis-aligned box: center theta/lat, halfArc along ring, halfLat across,
   // height above the ground at the obstacle's base. `base` = groundH at its
   // center, so `top` = base + height and the box blocks only up to its top.
-  addBox(theta, lat, halfArc, halfLat, height) {
+  // `tag` is opaque to collision — the guideway planner uses it to find its way
+  // back from a conflict to the building that caused it (see transit.js).
+  addBox(theta, lat, halfArc, halfLat, height, tag = null) {
     const s = ((theta * RF) % CIRCUMFERENCE + CIRCUMFERENCE) % CIRCUMFERENCE;
     const base = (typeof groundH === 'function') ? groundH(theta, lat, Infinity) : 0;
-    this._register({ kind: 'box', s, lat, halfArc, halfLat, height, base, top: base + height }, s, halfArc);
+    this._register({ kind: 'box', theta, s, lat, halfArc, halfLat, height, base, top: base + height, tag }, s, halfArc);
   }
 
-  addCylinder(theta, lat, radius, height) {
+  addCylinder(theta, lat, radius, height, tag = null) {
     const s = ((theta * RF) % CIRCUMFERENCE + CIRCUMFERENCE) % CIRCUMFERENCE;
     const base = (typeof groundH === 'function') ? groundH(theta, lat, Infinity) : 0;
-    this._register({ kind: 'cyl', s, lat, radius, height, base, top: base + height }, s, radius);
+    this._register({ kind: 'cyl', theta, s, lat, radius, height, base, top: base + height, tag }, s, radius);
+  }
+
+  // Every obstacle that could overlap arc position `s`. Registration covers a
+  // whole obstacle's extent (plus 2 m) in every bucket it touches, so the one
+  // bucket containing `s` is sufficient and needs no de-duplication.
+  bucketAt(s) {
+    return this.buckets[this._bucketOf(((s % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE)];
   }
 
   // Push a circle of `radius` at (s, lat, h) out of all nearby obstacles.

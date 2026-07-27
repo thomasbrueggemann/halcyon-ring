@@ -387,6 +387,14 @@ function buildWorld(scene, textures, colliders) {
         const outside = e.dry ? 1e9 : Math.max(0, Math.max(e.lo - lat, lat - e.hi));
         let sand = 1 - _sstep(0.0, 4.2 + jit * 1.4, outside);         // bed + beach
         if (onIsland(theta, lat)) sand = Math.max(sand, 0.4);         // island shingle
+        // Lake shores. `outside` is measured off the RIVER's edges and knows
+        // nothing about standing water, so without this the grass runs straight
+        // into the lake with no strand at all. Height above the waterline is the
+        // right key here: the bowl's own slope decides how wide the beach is, so
+        // a shallow bay gets a broad one and a steep bank barely any.
+        if (inLake(theta, lat, 5.5)) {
+          sand = Math.max(sand, 1 - _sstep(0.0, 2.4 + jit * 0.8, h - WATER_H));
+        }
         // Snowline. There is no fourth splat layer, so the caps borrow the
         // sand map — pale and fine-grained — and the vertex colour below
         // brightens it the rest of the way. Brightening the ROCK map instead
@@ -398,7 +406,13 @@ function buildWorld(scene, textures, colliders) {
         // The rim goes bare above the tree line. Keyed off ALTITUDE, not lat:
         // the mountain foot wanders ±8 m, and a fixed lat band would run across
         // the headlands and leave rock lying in the bays between them.
-        rock = Math.max(rock, _sstep(15 + jit * 2.0, 30, h) * _sstep(MTN_LAT0 - 8, MTN_LAT0, alat));
+        // A spur is the same rim rock thrown across the valley, so it goes bare
+        // on the same terms — except the lat gate has to be replaced by "am I
+        // standing on a spur", or a buttress 40 m out in the fields stays a
+        // grassy loaf while the rim behind it is bare stone.
+        const onRim = Math.max(_sstep(MTN_LAT0 - 8, MTN_LAT0, alat),
+                               _sstep(2.0, 9.0, spurH(theta, lat)));
+        rock = Math.max(rock, _sstep(15 + jit * 2.0, 30, h) * onRim);
         rock *= 1 - sand;
         const grass = Math.max(0, 1 - rock - sand);
         splat[k * 3] = grass; splat[k * 3 + 1] = rock; splat[k * 3 + 2] = sand;
@@ -760,6 +774,145 @@ function buildWorld(scene, textures, colliders) {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  // Tunnels through the mountain spurs
+  // ══════════════════════════════════════════════════════════════════════════
+  // layout.js already cut the notch — the ground through a spur is at corridor
+  // level with rock standing 10-40 m either side, and that is what you walk and
+  // drive on. All that is missing is the lid. A vault dropped into the notch
+  // turns a slot into a bore; a portal ring at each mouth stops it reading as a
+  // hole someone forgot to finish.
+  //
+  // Deliberately dressing, not collision: nothing about getting through a spur
+  // depends on this geometry existing, so a spur the sweep judged too shallow to
+  // roof is simply a pass you drive over instead of a tunnel you drive into.
+  if (ROAD_TUNNELS.length || RAIL_TUNNELS.length) {
+    const rockMat = new THREE.MeshStandardMaterial({
+      map: textures.rock, normalMap: textures.rockN, roughnessMap: textures.rockR,
+      color: 0x8d8880, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
+    });
+    const portalMat = new THREE.MeshStandardMaterial({
+      map: textures.concrete, normalMap: textures.concreteN,
+      color: 0xa9a49a, roughness: 0.92, metalness: 0.02, side: THREE.DoubleSide,
+    });
+    const lampMat = new THREE.MeshStandardMaterial({
+      color: 0xfff0cf, emissive: 0xffd9a0, emissiveIntensity: 2.4, roughness: 0.5,
+    });
+    // Superelliptic springing: sin^0.55 stands the first few metres of wall up
+    // near-vertical and still rounds the crown, which is the difference between
+    // a tunnel and a culvert. Entries are [lateral × W, vertical × HC] — except
+    // the two skirt points, which drop a fixed 4.5 m BELOW the corridor floor so
+    // the wall foot is buried. Without them you see daylight and grass under the
+    // springing line from inside the bore, wherever the rock hadn't yet risen
+    // to meet it.
+    const SKIRT = 4.5;
+    const arch = [[-1, -SKIRT, 1]];
+    const AN = 16;
+    for (let j = 0; j <= AN; j++) {
+      const phi = (j / AN) * Math.PI;
+      arch.push([-Math.cos(phi), Math.pow(Math.sin(phi), 0.55), 0]);
+    }
+    arch.push([1, -SKIRT, 1]);
+    const M = arch.length - 1;                      // segments across the arch
+    // [2] flags a skirt point: its height is metres, not a fraction of HC.
+    const archH = (j, HC) => (arch[j][2] ? arch[j][1] : arch[j][1] * HC);
+    const vaults = [], portals = [], lamps = [];
+    const p = new THREE.Vector3(), q = new THREE.Vector3();
+    const buildBore = (run, latFn, floorFn, W, HC) => {
+      const PAD = 3.0;                              // bury each end in the rock
+      const s0 = run.s0 - PAD, s1 = run.s1 + PAD;
+      const N = Math.max(6, Math.ceil((s1 - s0) / 2.2));
+      const ring = [];
+      for (let i = 0; i <= N; i++) {
+        const theta = (s0 + (s1 - s0) * (i / N)) / RF;
+        const lat = latFn(theta), base = floorFn(theta);
+        const pts = [];
+        for (let j = 0; j <= M; j++) {
+          pts.push({ theta, lat: lat + arch[j][0] * W, h: base + archH(j, HC) });
+        }
+        ring.push(pts);
+      }
+      // vault shell
+      const NV = (N + 1) * (M + 1);
+      const pos = new Float32Array(NV * 3), uv = new Float32Array(NV * 2);
+      for (let i = 0; i <= N; i++) {
+        for (let j = 0; j <= M; j++) {
+          const r = ring[i][j], k = i * (M + 1) + j;
+          torusPosition(r.theta, r.lat, r.h, p);
+          pos[k * 3] = p.x; pos[k * 3 + 1] = p.y; pos[k * 3 + 2] = p.z;
+          uv[k * 2] = (s0 + (s1 - s0) * (i / N)) / 6;
+          uv[k * 2 + 1] = (j / M) * (Math.PI * W) / 6;
+        }
+      }
+      const idx = [];
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < M; j++) {
+          const a = i * (M + 1) + j, b = a + (M + 1);
+          idx.push(a, b, a + 1, b, b + 1, a + 1);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      g.setIndex(idx);
+      g.computeVertexNormals();
+      vaults.push(g);
+
+      // portal ring at each mouth — the arch stepped out 1.1 m all round
+      for (const end of [0, N]) {
+        const pts = ring[end];
+        const pp = new Float32Array((M + 1) * 2 * 3);
+        const pu = new Float32Array((M + 1) * 2 * 2);
+        for (let j = 0; j <= M; j++) {
+          const base = floorFn(pts[j].theta);
+          torusPosition(pts[j].theta, pts[j].lat, pts[j].h, p);
+          torusPosition(pts[j].theta, pts[j].lat + arch[j][0] * 1.3,
+            base + archH(j, HC) + (arch[j][2] ? 0 : arch[j][1] * 1.3), q);
+          pp[j * 6] = p.x; pp[j * 6 + 1] = p.y; pp[j * 6 + 2] = p.z;
+          pp[j * 6 + 3] = q.x; pp[j * 6 + 4] = q.y; pp[j * 6 + 5] = q.z;
+          pu[j * 4] = j * 0.6; pu[j * 4 + 1] = 0;
+          pu[j * 4 + 2] = j * 0.6; pu[j * 4 + 3] = 1;
+        }
+        const pidx = [];
+        for (let j = 0; j < M; j++) {
+          const a = j * 2;
+          pidx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+        }
+        const pg = new THREE.BufferGeometry();
+        pg.setAttribute('position', new THREE.BufferAttribute(pp, 3));
+        pg.setAttribute('uv', new THREE.BufferAttribute(pu, 2));
+        pg.setIndex(pidx);
+        pg.computeVertexNormals();
+        portals.push(pg);
+      }
+
+      // crown lamps, so the bore is somewhere you can see rather than a black slot
+      for (let s = s0 + 8; s < s1 - 4; s += 13) {
+        const theta = s / RF;
+        const lg = new THREE.BoxGeometry(1.6, 0.14, 0.5);
+        placementMatrix(theta, latFn(theta), floorFn(theta) + HC * 0.93, 0, 1, m);
+        lg.applyMatrix4(m);
+        lamps.push(lg);
+      }
+    };
+
+    for (const run of ROAD_TUNNELS) {
+      buildBore(run, roadLat, (t) => roadH(t) - 0.15, 10.5, Math.min(9.0, run.crown * 0.55 + 4.5));
+    }
+    for (const run of RAIL_TUNNELS) {
+      // The vault has to clear the deck, which rides ~7 m over the notch floor.
+      buildBore(run, railLatStatic, (t) => terrainH(t, railLatStatic(t)) - 0.2, 7.4,
+        Math.min(15.0, (railH(run.thetaMid) - terrainH(run.thetaMid, railLatStatic(run.thetaMid))) + 5.0));
+    }
+    if (vaults.length) {
+      const mesh = new THREE.Mesh(mergeGeometries(vaults), rockMat);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      world.add(mesh);
+    }
+    if (portals.length) world.add(new THREE.Mesh(mergeGeometries(portals), portalMat));
+    if (lamps.length) world.add(new THREE.Mesh(mergeGeometries(lamps), lampMat));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // Water: the river, the lake, and the hillside tributaries
   // ══════════════════════════════════════════════════════════════════════════
   const waterMat = makeWaterMaterial(textures);
@@ -801,6 +954,78 @@ function buildWorld(scene, textures, colliders) {
     const river = new THREE.Mesh(geo, waterMat);
     river.renderOrder = 2;
     world.add(river);
+  }
+
+  // ── Standing lakes ──
+  // One fan per lake, meshed out to the REAL shoreline rather than to the
+  // nominal rim: the bowl is carved into rolling ground, so where the water
+  // actually stops varies by bearing. Bisecting for it per spoke is the same
+  // trick waterEdges plays on the river, and it is what keeps the sheet from
+  // laying a pane of water over the grass on the shallow side.
+  if (LAKES.length) {
+    const geos = [];
+    const A = 72, R = 7;
+    const p = new THREE.Vector3();
+    for (const lk of LAKES) {
+      const shore = new Float64Array(A);
+      for (let a = 0; a < A; a++) {
+        const ang = (a / A) * Math.PI * 2;
+        const rim = lakeRim(lk, ang);
+        const wet = (m) => {
+          const q = lakePoint(lk, ang, m);
+          return terrainH(q.theta, q.lat) < WATER_H - 0.01;
+        };
+        if (!wet(0)) { shore[a] = 0; continue; }
+        let lo = 0, hi = rim;
+        for (let k = 0; k < 18; k++) { const mid = (lo + hi) / 2; if (wet(mid)) lo = mid; else hi = mid; }
+        shore[a] = lo;
+      }
+      let any = 0;
+      for (let a = 0; a < A; a++) any = Math.max(any, shore[a]);
+      if (any < 0.05) continue;
+      const NV = A * R;
+      const positions = new Float32Array(NV * 3);
+      const uvs = new Float32Array(NV * 2);
+      const depths = new Float32Array(NV);
+      const normals = new Float32Array(NV * 3);
+      for (let a = 0; a < A; a++) {
+        const ang = (a / A) * Math.PI * 2;
+        for (let r = 0; r < R; r++) {
+          const m = shore[a] * (r / (R - 1));
+          const q = lakePoint(lk, ang, m);
+          const k = a * R + r;
+          torusPosition(q.theta, q.lat, WATER_H, p);
+          positions[k * 3] = p.x; positions[k * 3 + 1] = p.y; positions[k * 3 + 2] = p.z;
+          uvs[k * 2] = q.theta * RF; uvs[k * 2 + 1] = q.lat;
+          depths[k] = Math.max(0, WATER_H - terrainH(q.theta, q.lat));
+          const c = Math.cos(q.theta), sn = Math.sin(q.theta);
+          normals[k * 3] = -c; normals[k * 3 + 1] = 0; normals[k * 3 + 2] = -sn;
+        }
+      }
+      // Ring r = 0 is the lake's centre point repeated A times; stitching it as
+      // quads costs a few degenerate triangles and saves a special case.
+      const indices = [];
+      for (let a = 0; a < A; a++) {
+        const a2 = (a + 1) % A;
+        for (let r = 0; r < R - 1; r++) {
+          const i0 = a * R + r, i1 = a * R + r + 1;
+          const j0 = a2 * R + r, j1 = a2 * R + r + 1;
+          indices.push(i0, i1, j1, i0, j1, j0);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+      g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+      g.setAttribute('aDepth', new THREE.BufferAttribute(depths, 1));
+      g.setIndex(indices);
+      geos.push(g);
+    }
+    if (geos.length) {
+      const lakes = new THREE.Mesh(mergeGeometries(geos), waterMat);
+      lakes.renderOrder = 2;
+      world.add(lakes);
+    }
   }
 
   // ── Tributary streams: thin water ribbons down the hillside, pinched to

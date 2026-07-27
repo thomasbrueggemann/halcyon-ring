@@ -46,10 +46,181 @@ function _railFrame(theta) {
   _txUp2.crossVectors(_txFwd, _txRight).normalize();   // re-orthonormalized up
 }
 
-function buildTransit(scene, colliders, rng) {
+function buildTransit(scene, colliders, rng, city) {
   const group = new THREE.Group();
   scene.add(group);
   const RAIL_SEGS = 1200;
+
+  // ── Route planning: threading the guideway through what actually got built ─
+  // layout.js draws the guideway from the river outward, and city.js then puts
+  // houses and towers wherever the corridors leave room — using this very
+  // curve to decide what "room" means. That works in lat, but not in height:
+  // the deck rides ~6.5 m up, a two-storey house with a gable reaches 8.3 and a
+  // downtown block 19, so the route was quietly running through roofs.
+  //
+  // Nothing here MOVES a building. The route is re-planned against the city
+  // that exists, in this order of preference:
+  //   1. steer  — a smooth lat detour around it (layout.setRailDetours), which
+  //               is what you want for a house: the line simply curves past it.
+  //   2. tunnel — for a tower deep enough to take a bore, the line is instead
+  //               pulled onto its centreline and driven straight through.
+  //   3. hop    — a gentle rise in the deck to clear a roof, when neither fits.
+  //   4. hide   — a block that survives all three was standing exactly where
+  //               the guideway has to be; it is never built.
+  // Every detour still passes through railLat's station freeze and its hard
+  // river/floor clamp, so no amount of steering can push the line into the
+  // water or off a platform.
+  const ROUTE = (function planRoute() {
+    const CORRIDOR = RAIL_HALF + 1.7;    // lateral half-width the deck needs clear
+    const UNDER = 0.5;                   // deck underside, below railH
+    const HEADROOM = 0.7;                // gap insisted on over a roof
+    // Deliberately small. A guideway that swerves 15 m round every gable is
+    // worse to look at than one that runs through them: these caps keep a
+    // detour to a curve you'd take at line speed, and hand anything bigger to
+    // a hop or a bore instead.
+    const MAX_STEER = 7, MAX_RISE = 5.0;
+    const BORE_HALF = 2.5, BORE_DOWN = 1.2, BORE_UP = 3.3;
+    const STEER_SIGMA = 30;              // how gently a detour eases in (m of arc)
+    const HOP_SIGMA = 34;
+    const recs = new Map();              // collider entry → plan record
+
+    const nearStation = (theta) => {
+      for (const st of STATIONS) if (Math.abs(arcDelta(theta, st.theta)) < 62) return true;
+      return false;
+    };
+    const push = () => {
+      const det = [], rise = [];
+      for (const r of recs.values()) {
+        if (r.lat) det.push({ thetaDeg: r.thetaDeg, amt: r.lat, sigma: r.sigma, flat: r.flat });
+        if (r.rise) rise.push({ thetaDeg: r.thetaDeg, amt: r.rise, sigma: r.sigma, flat: r.flat });
+      }
+      setRailDetours(det, rise);
+    };
+    // Worst conflict per obstacle over the whole ring, with the current route.
+    const scan = () => {
+      const found = new Map();
+      for (let s = 0; s < CIRCUMFERENCE; s += 2.5) {
+        const theta = s / RF;
+        if (nearStation(theta)) continue;
+        const lat = railLat(theta), deck = railH(theta);
+        for (const e of colliders.bucketAt(s)) {
+          if (e.top < deck - UNDER - HEADROOM) continue;      // the line clears it
+          const hArc = e.kind === 'box' ? e.halfArc : e.radius;
+          const hLat = e.kind === 'box' ? e.halfLat : e.radius;
+          let ds = s - e.s;
+          if (ds > CIRCUMFERENCE / 2) ds -= CIRCUMFERENCE;
+          else if (ds < -CIRCUMFERENCE / 2) ds += CIRCUMFERENCE;
+          if (Math.abs(ds) > hArc + 1.0) continue;
+          const dLat = lat - e.lat;
+          const need = (hLat + CORRIDOR) - Math.abs(dLat);
+          if (need <= 0) continue;
+          const prev = found.get(e);
+          if (!prev || need > prev.need) {
+            found.set(e, { e, need, side: dLat >= 0 ? 1 : -1, deck, hArc, hLat });
+          }
+        }
+      }
+      return found;
+    };
+    // A tower deep enough to keep a jamb either side of the bore and a lintel
+    // over it is tunnelled on sight — that is the whole point of running a
+    // monorail through a downtown block rather than around it.
+    const boreAt = (theta, lat) => ({
+      lat: lat === undefined ? railLat(theta) : lat, half: BORE_HALF,
+      deckHalf: RAIL_HALF + 0.45,
+      y0: railH(theta) - BORE_DOWN, y1: railH(theta) + BORE_UP,
+    });
+    // Ask the city whether the tower can actually take the hole — a block that
+    // is too shallow for a jamb, or too short for a lintel, is better curved
+    // around or hopped than deleted.
+    // Tested against a bore on the tower's OWN centreline, because that is
+    // where the line will be pulled to if this becomes a tunnel — testing it
+    // where the route happens to lie right now would reject almost everything.
+    const borable = (c) =>
+      !!(c.e.tag && c.e.tag.kind === 'block' && city &&
+         city.boreFits(c.e.tag, boreAt(c.e.theta, c.e.lat)));
+    const record = (c) => {
+      let r = recs.get(c.e);
+      if (!r) {
+        r = {
+          e: c.e, mode: borable(c) ? 'tunnel' : 'steer', lat: 0, rise: 0,
+          thetaDeg: c.e.theta / DEG, sigma: STEER_SIGMA, flat: c.hArc + 4,
+        };
+        recs.set(c.e, r);
+      }
+      return r;
+    };
+
+    let pass = 0;
+    for (; pass < 7; pass++) {
+      push();
+      // tunnels are re-centred every pass — the bore has to be square through
+      // the tower, and other detours nearby keep moving the line under it
+      for (const r of recs.values()) {
+        if (r.mode !== 'tunnel') continue;
+        const want = r.lat + (r.e.lat - railLat(r.e.theta));
+        r.lat = Math.max(-MAX_STEER, Math.min(MAX_STEER, want));
+      }
+      const found = scan();
+      if (!found.size) break;
+      let changed = false;
+      for (const c of found.values()) {
+        const r = record(c);
+        if (r.mode === 'tunnel') continue;      // not avoided — re-centred above
+        if (r.mode === 'steer') {
+          const want = r.lat + c.side * (c.need + 0.8);
+          if (Math.abs(want) <= MAX_STEER && pass < 4) { r.lat = want; changed = true; continue; }
+          // out of room to steer (or the detours are chasing each other round
+          // in circles) — lift the deck over it instead
+          r.mode = 'hop';
+          r.lat = 0;
+          r.flat = c.hArc + 3;
+          r.sigma = HOP_SIGMA;                  // a long, gentle climb
+          changed = true;
+        } else if (r.mode === 'hop') {
+          const want = r.rise + (c.e.top + HEADROOM + UNDER) - c.deck + 0.2;
+          if (want <= MAX_RISE) { r.rise = want; changed = true; continue; }
+          r.mode = 'hide';                      // it was built on the line
+          r.rise = 0;
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    push();
+
+    // ── final audit, and act on the decisions ──
+    const bores = [], stats = { steer: 0, tunnel: 0, hop: 0, hidden: 0 };
+    for (const r of recs.values()) {
+      if (r.mode === 'steer' && r.lat) stats.steer++;
+      else if (r.mode === 'hop' && r.rise) stats.hop++;
+      else if (r.mode === 'hide') {
+        if (city && city.clearSite(r.e.tag)) stats.hidden++;
+      } else if (r.mode === 'tunnel') {
+        const bore = city && city.pierceBlock(r.e.tag, boreAt(r.e.theta));
+        if (bore) { bores.push(bore); stats.tunnel++; continue; }
+        // The bore fitted when it was planned on the tower's centreline, but
+        // the line never made it there — say so, then take the tower down.
+        console.warn(`[transit] no bore @${r.thetaDeg.toFixed(1)}°: line sits ` +
+          `${(railLat(r.e.theta) - r.e.lat).toFixed(1)} m off the tower's centre`);
+        if (city && city.clearSite(r.e.tag)) stats.hidden++;
+      }
+    }
+    // Anything still overlapping the corridor that is NOT a tunnel we drove
+    // through on purpose, or a site we cleared, is a genuine miss.
+    let leftN = 0, worst = 0;
+    for (const c of scan().values()) {
+      const r = recs.get(c.e);
+      if (r && (r.mode === 'tunnel' || r.mode === 'hide')) continue;
+      leftN++;
+      if (c.need > worst) worst = c.need;
+    }
+    const msg = `[transit] route: ${stats.steer} detours, ${stats.tunnel} tunnels, ` +
+                `${stats.hop} hops, ${stats.hidden} sites cleared, ${leftN} left ` +
+                `(worst ${worst.toFixed(1)} m) after ${pass + 1} passes`;
+    if (leftN) console.warn(msg); else console.log(msg);
+    return { bores, stats, recs };
+  })();
 
   // ── swept guideway geometry: a profile carried along the winding path ──
   function sweepPath(profile, segs) {
@@ -99,6 +270,40 @@ function buildTransit(scene, colliders, rng) {
   const rails = new THREE.Mesh(mergeGeometries(railGeos), railMat);
   rails.castShadow = true;
   group.add(rails);
+
+  // ── tunnel dressing: a portal lip at each mouth and lamps down the bore ──
+  // The bore itself is walled by the pierced building (city.pierceBlock), so
+  // this is only what makes it read as a transit tunnel rather than a hole.
+  if (ROUTE.bores.length) {
+    const portalMat = new THREE.MeshStandardMaterial({ color: 0x4a525c, roughness: 0.8, metalness: 0.25 });
+    const boreLampMat = new THREE.MeshStandardMaterial({
+      color: 0xffe9b8, emissive: 0xffd98a, emissiveIntensity: 1.4, roughness: 0.5,
+    });
+    for (const b of ROUTE.bores) {
+      const midY = (b.y0 + b.y1) / 2, hgt = b.y1 - b.y0;
+      for (const sgn of [-1, 1]) {
+        const th = b.theta + sgn * (b.arcHalf + 0.18) / RF;
+        const lat = railLat(b.theta);
+        // lintel + jambs, standing 0.35 m proud of the face
+        const lintel = new THREE.Mesh(new THREE.BoxGeometry(b.half * 2 + 0.9, 0.45, 0.36), portalMat);
+        lintel.applyMatrix4(placementMatrix(th, lat, b.y1 + 0.22, 0, 1));
+        group.add(lintel);
+        for (const dl of [-(b.half + 0.22), b.half + 0.22]) {
+          const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.45, hgt + 0.45, 0.36), portalMat);
+          jamb.applyMatrix4(placementMatrix(th, lat + dl, midY + 0.22, 0, 1));
+          group.add(jamb);
+        }
+      }
+      // lamps along the crown of the bore
+      const n = Math.max(2, Math.round(b.arcHalf));
+      for (let k = 0; k < n; k++) {
+        const th = b.theta + (-b.arcHalf + 0.6 + (k + 0.5) * (2 * b.arcHalf - 1.2) / n) / RF;
+        const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.35), boreLampMat);
+        lamp.applyMatrix4(placementMatrix(th, railLat(b.theta), b.y1 - 0.14, 0, 1));
+        group.add(lamp);
+      }
+    }
+  }
 
   // ── support pylons every ~30 m, ground → deck bottom (variable height) ──
   const pylonMat = new THREE.MeshStandardMaterial({ color: 0x7a828c, roughness: 0.5, metalness: 0.5 });
@@ -342,27 +547,148 @@ function buildTransit(scene, colliders, rng) {
   }
 
   // ── trains: two 3-car sets, opposite directions, distinct liveries ──
+  //
+  // The car is NOT a solid box. You ride inside one, and a box has no inside:
+  // its faces are front-facing, so from a seat you looked straight through the
+  // walls and the ride read as standing on a bare deck. The body is built as a
+  // shell of panels around a hollow saloon — sills, cant rails, window pillars,
+  // door pockets, end walls with a windscreen — so the openings are real
+  // openings and the cabin has a floor, a ceiling, seats and grab poles you can
+  // see. Geometry is merged per material and shared by all 18 cars; only the
+  // livery material differs.
+  const CAR_W = 2.44;                  // outer width
+  const WALL_T = 0.09;
+  const CAR_X = CAR_W / 2 - WALL_T / 2;  // side-panel centreline
+  const IN_X = CAR_W / 2 - WALL_T;     // inner face of a side wall
+  const FLOOR_Y = 0.30;                // saloon floor (car-local)
+  const SILL_Y = 1.04;                 // window sill
+  const HEAD_Y = 2.20;                 // window head
+  const CEIL_Y = 2.46;                 // ceiling underside
+  const ROOF_Y = 2.62;                 // outer roof
+  const HALF_L = CAR_LEN / 2;
+  const DOOR_HALF = 0.62;              // door leaf half-width, mid-car
+  const POST_W = 0.34;                 // window pillar width along the car
+  const EYE_LOCAL = FLOOR_Y + EYE_HEIGHT;   // 1.92 — mid-window, as it should be
+
+  // ── shared car geometry, built once ──
+  const CAR_GEO = (function buildCarGeometry() {
+    const shell = [], liner = [], accent = [], glass = [], lamp = [];
+    const box = (w, h, d, x, y, z) => {
+      const g = new THREE.BoxGeometry(w, h, d);
+      g.translate(x, y, z);
+      return g;
+    };
+    const tube = (r, len, x, y, z, axis = 'y') => {
+      const g = new THREE.CylinderGeometry(r, r, len, 8);
+      if (axis === 'z') g.rotateX(Math.PI / 2);
+      g.translate(x, y, z);
+      return g;
+    };
+
+    // underframe + floor pan (the saloon floor itself is dark rubber, not white
+    // — a white-on-white cabin under a full-strength sun blows out to a fog)
+    accent.push(box(1.7, 0.34, CAR_LEN - 1.5, 0, 0.12, 0));
+    shell.push(box(CAR_W, 0.14, CAR_LEN, 0, FLOOR_Y - 0.07, 0));
+    accent.push(box(CAR_W - 2 * WALL_T, 0.03, CAR_LEN - 2 * WALL_T, 0, FLOOR_Y + 0.015, 0));
+
+    // window bays: [corner post][window][post][door][post][window][corner post]
+    const winLen = (CAR_LEN - 2 * POST_W - 2 * POST_W - 2 * DOOR_HALF) / 2;
+    const winZ = DOOR_HALF + POST_W + winLen / 2;   // ± centre of each window
+    for (const sx of [-1, 1]) {
+      const x = sx * CAR_X;
+      shell.push(box(WALL_T, SILL_Y - FLOOR_Y, CAR_LEN, x, (FLOOR_Y + SILL_Y) / 2, 0));   // sill band
+      shell.push(box(WALL_T, ROOF_Y - HEAD_Y, CAR_LEN, x, (HEAD_Y + ROOF_Y) / 2, 0));     // cant rail
+      // pillars: two corner, two flanking the door
+      for (const pz of [-(HALF_L - POST_W / 2), HALF_L - POST_W / 2,
+        -(DOOR_HALF + POST_W / 2), DOOR_HALF + POST_W / 2]) {
+        shell.push(box(WALL_T, HEAD_Y - SILL_Y, POST_W, x, (SILL_Y + HEAD_Y) / 2, pz));
+      }
+      // interior lining over the sill band and the cant rail
+      liner.push(box(0.02, SILL_Y - FLOOR_Y - 0.06, CAR_LEN - 2 * WALL_T, sx * (IN_X - 0.01), (FLOOR_Y + SILL_Y) / 2, 0));
+      liner.push(box(0.02, CEIL_Y - HEAD_Y, CAR_LEN - 2 * WALL_T, sx * (IN_X - 0.01), (HEAD_Y + CEIL_Y) / 2, 0));
+      // door leaves: a dark lower panel in the sill band + a seam up the middle
+      accent.push(box(0.035, SILL_Y - FLOOR_Y - 0.04, DOOR_HALF * 2, sx * (CAR_W / 2 + 0.01), (FLOOR_Y + SILL_Y) / 2, 0));
+      accent.push(box(0.04, HEAD_Y - FLOOR_Y, 0.05, sx * (CAR_W / 2 + 0.005), (FLOOR_Y + HEAD_Y) / 2, 0));
+      // glazing: two saloon windows + the door light
+      glass.push(box(0.05, HEAD_Y - SILL_Y, winLen, x, (SILL_Y + HEAD_Y) / 2, winZ));
+      glass.push(box(0.05, HEAD_Y - SILL_Y, winLen, x, (SILL_Y + HEAD_Y) / 2, -winZ));
+      glass.push(box(0.05, HEAD_Y - SILL_Y - 0.02, DOOR_HALF * 2 - 0.06, x, (SILL_Y + HEAD_Y) / 2, 0));
+    }
+
+    // end walls — a windscreen opening 1.72 wide, both ends (the sets run either
+    // way round the ring, so every car is a cab car as far as the view goes)
+    const JAMB = (CAR_W - 2 * WALL_T - 1.72) / 2;
+    for (const sz of [-1, 1]) {
+      const z = sz * (HALF_L - WALL_T / 2);
+      shell.push(box(CAR_W, SILL_Y - FLOOR_Y + 0.14, WALL_T, 0, (FLOOR_Y + SILL_Y) / 2 - 0.07, z));
+      shell.push(box(CAR_W, ROOF_Y - HEAD_Y, WALL_T, 0, (HEAD_Y + ROOF_Y) / 2, z));
+      for (const sx of [-1, 1]) {
+        shell.push(box(JAMB, HEAD_Y - SILL_Y, WALL_T, sx * (CAR_W / 2 - JAMB / 2), (SILL_Y + HEAD_Y) / 2, z));
+      }
+      glass.push(box(1.72, HEAD_Y - SILL_Y, 0.05, 0, (SILL_Y + HEAD_Y) / 2, z));
+      // lining, so the end of the saloon is a wall and not a white void
+      const zi = z - sz * (WALL_T / 2 + 0.01);
+      liner.push(box(CAR_W - 2 * WALL_T, SILL_Y - FLOOR_Y, 0.02, 0, (FLOOR_Y + SILL_Y) / 2, zi));
+      liner.push(box(CAR_W - 2 * WALL_T, CEIL_Y - HEAD_Y, 0.02, 0, (HEAD_Y + CEIL_Y) / 2, zi));
+      for (const sx of [-1, 1]) {
+        liner.push(box(JAMB, HEAD_Y - SILL_Y, 0.02, sx * (CAR_W / 2 - JAMB / 2), (SILL_Y + HEAD_Y) / 2, zi));
+      }
+      // marker light bar under the windscreen
+      lamp.push(box(1.1, 0.12, 0.06, 0, SILL_Y - 0.22, sz * (HALF_L + 0.02)));
+    }
+
+    // roof: outer skin + a slim equipment fairing, and the ceiling below it
+    shell.push(box(CAR_W, ROOF_Y - CEIL_Y, CAR_LEN, 0, (CEIL_Y + ROOF_Y) / 2, 0));
+    shell.push(box(1.5, 0.12, CAR_LEN - 1.2, 0, ROOF_Y + 0.06, 0));
+    liner.push(box(CAR_W - 2 * WALL_T, 0.03, CAR_LEN - 2 * WALL_T, 0, CEIL_Y - 0.015, 0));
+    lamp.push(box(0.42, 0.05, CAR_LEN - 1.4, 0, CEIL_Y - 0.05, 0));   // ceiling light strip
+
+    // saloon fittings: bench seats under the windows, poles, ceiling handrails
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const cz = sz * winZ;
+        accent.push(box(0.52, 0.08, winLen - 0.1, sx * (IN_X - 0.26), 0.76, cz));         // seat pan
+        accent.push(box(0.07, 0.44, winLen - 0.1, sx * (IN_X - 0.035), 1.02, cz));        // backrest
+        accent.push(box(0.5, 0.36, 0.07, sx * (IN_X - 0.26), 0.54, cz - (winLen - 0.1) / 2 + 0.05));
+        accent.push(box(0.5, 0.36, 0.07, sx * (IN_X - 0.26), 0.54, cz + (winLen - 0.1) / 2 - 0.05));
+        accent.push(tube(0.035, CEIL_Y - FLOOR_Y, sx * 0.62, (FLOOR_Y + CEIL_Y) / 2, cz)); // grab pole
+      }
+      accent.push(tube(0.03, CAR_LEN - 1.0, sx * 0.62, CEIL_Y - 0.22, 0, 'z'));            // handrail
+    }
+
+    const merge = (arr) => mergeGeometries(arr);
+    return {
+      shell: merge(shell), liner: merge(liner), accent: merge(accent),
+      glass: merge(glass), lamp: merge(lamp),
+    };
+  })();
+
+  const carLinerMat = new THREE.MeshStandardMaterial({ color: 0xb6c0c8, roughness: 0.9 });
+  const carAccentMat = new THREE.MeshStandardMaterial({ color: 0x39434e, roughness: 0.65, metalness: 0.35 });
+  const carGlassMat = new THREE.MeshStandardMaterial({
+    color: 0xbcd9e8, roughness: 0.08, metalness: 0.15,
+    transparent: true, opacity: 0.14, side: THREE.DoubleSide,
+  });
+  const carLampMat = new THREE.MeshStandardMaterial({
+    color: 0xfdf6e2, emissive: 0xfff2cc, emissiveIntensity: 0.85, roughness: 0.4,
+  });
+  const carShellMats = {};
+
   function makeCar(bodyColor) {
+    if (!carShellMats[bodyColor]) {
+      carShellMats[bodyColor] = new THREE.MeshStandardMaterial({
+        color: bodyColor, roughness: 0.35, metalness: 0.3,
+      });
+    }
     const car = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(2.0, 2.2, CAR_LEN),
-      new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.35, metalness: 0.3 })
-    );
-    body.position.y = 1.35;
-    const band = new THREE.Mesh(
-      new THREE.BoxGeometry(2.06, 0.75, CAR_LEN - 0.9),
-      new THREE.MeshStandardMaterial({
-        color: 0x18222c, roughness: 0.2, metalness: 0.4, emissive: 0x8fb4c8, emissiveIntensity: 0.35,
-      })
-    );
-    band.position.y = 1.75;
-    const skirt = new THREE.Mesh(
-      new THREE.BoxGeometry(1.4, 0.35, CAR_LEN - 1.6),
-      new THREE.MeshStandardMaterial({ color: 0x3a424c, roughness: 0.6 })
-    );
-    skirt.position.y = 0.18;
-    car.add(body, band, skirt);
-    car.traverse(o => { o.castShadow = true; });
+    const shell = new THREE.Mesh(CAR_GEO.shell, carShellMats[bodyColor]);
+    shell.castShadow = true; shell.receiveShadow = true;
+    const liner = new THREE.Mesh(CAR_GEO.liner, carLinerMat);
+    const accent = new THREE.Mesh(CAR_GEO.accent, carAccentMat);
+    accent.castShadow = true;
+    const glass = new THREE.Mesh(CAR_GEO.glass, carGlassMat);
+    const lamp = new THREE.Mesh(CAR_GEO.lamp, carLampMat);
+    car.add(shell, liner, accent, glass, lamp);
     car.matrixAutoUpdate = false;
     group.add(car);
     return car;
@@ -397,11 +723,17 @@ function buildTransit(scene, colliders, rng) {
     out.copy(_txMat);
   }
 
-  // seat (feet) world position inside the lead car, on the platform-facing side
+  // Standing position (feet) inside the saloon of the lead car — on the aisle
+  // centreline, forward of the middle so the windscreen is ahead of you and the
+  // door is behind. 0.18 is the car origin above the deck, FLOOR_Y the saloon
+  // floor above that.
+  const SEAT_FWD = HALF_L - 1.6;
   function seatPos(train, out) {
     _railFrame(train.theta);
     _railPos(train.theta, _txSeat);
-    _txSeat.addScaledVector(_txRight, train.lane).addScaledVector(_txUp2, 0.30);
+    _txSeat.addScaledVector(_txRight, train.lane)
+      .addScaledVector(_txUp2, 0.18 + FLOOR_Y + 0.02)
+      .addScaledVector(_txFwd, train.dir * SEAT_FWD);
     out.copy(_txSeat);
     return out;
   }
@@ -549,8 +881,14 @@ function buildTransit(scene, colliders, rng) {
   const _seatW = new THREE.Vector3();
   let prompt = null;
 
+  // One light for the saloon you are actually standing in. Eighteen cars' worth
+  // of interior lighting would cost more than the rest of the ring put together;
+  // the emissive ceiling strip carries the other seventeen.
+  const cabinLight = new THREE.PointLight(0xfff1d4, 0, 11, 2);
+  group.add(cabinLight);
+
   const api = {
-    group, trains, stationInfos, player: null, prompt: null,
+    group, trains, stationInfos, player: null, prompt: null, route: ROUTE,
     seatPos, PLAT_RISE, etaTo, arrivalsAt, nextStation, stationAfter, legTime, DWELL_TIME,
   };
 
@@ -599,7 +937,10 @@ function buildTransit(scene, colliders, rng) {
         const t = worldToTorus(player.pos);
         player.theta = t.theta; player.lat = t.lat; player.h = t.h;
         player.vel.copy(_txFwd).multiplyScalar(tr.v * tr.dir);
-        player.vel.addScaledVector(_txUp2, 1.8);       // a little upward leap
+        // out through the doorway, not up through the roof — there is a cabin
+        // above your head now
+        player.vel.addScaledVector(_txRight, Math.sign(tr.lane) * 3.2);
+        player.vel.addScaledVector(_txUp2, 1.4);
         player.grounded = false;
         player.ride = null;
       }
@@ -674,8 +1015,12 @@ function buildTransit(scene, colliders, rng) {
 
     // ── boarding / riding prompt ──
     const player = api.player;
+    cabinLight.intensity = 0;
     if (player && player.ride) {
       const tr = player.ride.train;
+      seatPos(tr, _seatW);
+      cabinLight.position.copy(_seatW).addScaledVector(_txUp2, 1.7);
+      cabinLight.intensity = 9;
       const here = stationInfos.find(si => tr.state === 'dwell' && Math.abs(arcDelta(tr.theta, si.theta)) < 3);
       if (here) {
         prompt = `${here.name} — [E] step off`;

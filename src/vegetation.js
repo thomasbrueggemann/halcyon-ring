@@ -117,7 +117,15 @@ function buildVegetation(scene, textures, colliders, rng) {
       if (d > -22 && d < 60 && lat > st.lat - 5 && lat < st.lat + 11) return false;
     }
     if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + 2.5) return false;
+    // The guideway deck is only ~6.5 m up and a grown oak is taller than that,
+    // so a tree planted under it grows straight through the track. Planting is
+    // the last thing built, and by now the route is final — leave it the
+    // maintenance corridor it would have in a real ring.
+    if (Math.abs(lat - railLat(theta)) < 5.0) return false;
     if (waterDepth(theta, lat) > 0.02) return false;
+    // A lake has a beach: waterDepth alone stops the planting exactly at the
+    // waterline, which grows oaks with their roots in the shallows.
+    if (inLake(theta, lat, 2.2)) return false;
     if (terrainSlope(theta, lat) > 1.1) return false;
     return true;
   }
@@ -372,6 +380,26 @@ function buildVegetation(scene, textures, colliders, rng) {
         const th = theta + ((rng() - 0.5) * 16) / RF;
         const la = cLat - side * rng() * 11;               // downhill = toward the valley
         if (rockSiteOK(th, la)) rocks.push({ theta: th, lat: la, yaw: rng() * Math.PI * 2, scale: 0.5 + rng() * 1.5 });
+      }
+    }
+
+    // The same treatment for the spurs. rockSiteOK's lat band is the rim, and a
+    // spur is rim rock standing out in the fields — without its own pass the
+    // buttresses come out as bare geometry with nothing lying on them, which is
+    // what makes them look like a heightfield rather than a mountain.
+    const spurSiteOK = (theta, lat) => {
+      if (!onSpur(theta, lat)) return false;
+      if (spurH(theta, lat) < 4) return false;
+      if (terrainSlope(theta, lat) > 2.3) return false;
+      return !colliders.resolve(theta * RF, lat, 0.4, 1.2);
+    };
+    for (const sp of SPURS) {
+      for (let c = 0; c < 90; c++) {
+        const theta = sp.theta + ((rng() - 0.5) * 2.2 * (sp.halfArc + sp.feather)) / RF;
+        const lat = sp.tipLat + (sp.side * (MTN_LAT0 - 4) - sp.tipLat) * rng();
+        if (!spurSiteOK(theta, lat)) continue;
+        if (rng() < 0.28) boulders.push({ theta, lat, yaw: rng() * Math.PI * 2, scale: 1.4 + rng() * 3.0 });
+        else rocks.push({ theta, lat, yaw: rng() * Math.PI * 2, scale: 0.5 + rng() * 1.6 });
       }
     }
   }

@@ -102,6 +102,12 @@ function buildCity(scene, textures, colliders, rng) {
   const city = new THREE.Group();
   scene.add(city);
   const stations = {};
+  // Filled in by the downtown-block section below and handed to the guideway
+  // planner, which runs after the city exists and may need to bore through a
+  // tower (or, failing that, never build one that is standing on the route).
+  let pierceBlock = () => null;
+  let boreFits = () => null;
+  let hideBlock = () => false;
 
   // ════ Houses — dense, organic, Don-Davis-painting settlement ════
   // Nothing grid-like: homes cluster along the winding road and the LANES
@@ -151,17 +157,41 @@ function buildCity(scene, textures, colliders, rng) {
   // building either can move several metres, so a clearance measured only at
   // the centre lets one corner of the footprint sit on the carriageway. Test
   // both ends of the arc extent as well.
-  const clearOfCorridors = (theta, lat, hArc, hLat) => {
+  // `railClear` is the extra lat the guideway wants beyond the footprint. The
+  // deck rides only ~6.5 m up — lower than a gabled roof — so a house under it
+  // is a house the monorail runs through. Homes therefore keep off the line the
+  // same way they keep off the road, and transit.js's planner is left with the
+  // handful of real conflicts to steer, hop or tunnel through. Downtown towers
+  // are the deliberate exception: they pass RAIL_KEEP = 0 and get bored.
+  // The mountain spurs and the standing lakes arrived after this test did, and
+  // neither is a curve you can express as a lat clearance: a spur is rock the
+  // width of a district, a lake is a hole in the ground with water in it. Both
+  // are sampled over the footprint's corners for the same reason the corridors
+  // are — a 16 m building whose centre is dry can still have two feet in a lake.
+  const onBadGround = (theta, lat, hArc, hLat) => {
+    for (const ds of [-hArc, 0, hArc]) {
+      for (const dl of [-hLat, 0, hLat]) {
+        const th = theta + ds / RF;
+        if (onSpur(th, lat + dl)) return true;
+        if (inLake(th, lat + dl, 3)) return true;
+      }
+    }
+    return false;
+  };
+  const clearOfCorridors = (theta, lat, hArc, hLat, railClear = 0) => {
     for (const ds of [-hArc, 0, hArc]) {
       const th = theta + ds / RF;
       if (Math.abs(lat - roadLat(th)) < ROAD_HALF + ROAD_SHLDR + 1.5 + hLat) return false;
       if (Math.abs(lat - riverLat(th)) < riverHalf(th) + 3 + hLat) return false;
+      if (railClear && Math.abs(lat - railLat(th)) < railClear + hLat) return false;
     }
-    return true;
+    return !onBadGround(theta, lat, hArc, hLat);
   };
+  // half the deck + the margin the planner may still steer the line by
+  const RAIL_KEEP = RAIL_HALF + 4.5;
   const houseSiteOK = (theta, lat, half, hArc, hLat) => {
     if (Math.abs(lat) + hLat > BUILD_LAT) return false;
-    if (!clearOfCorridors(theta, lat, hArc, hLat)) return false;
+    if (!clearOfCorridors(theta, lat, hArc, hLat, RAIL_KEEP)) return false;
     if (nearStationZone(theta, lat, hArc, hLat)) return false;
     return !colliders.resolve(theta * RF, lat, 1.2, half);
   };
@@ -178,7 +208,8 @@ function buildCity(scene, textures, colliders, rng) {
       theta, lat, yaw: faceYaw + (rng() - 0.5) * 0.14, scale,
       tint: tintPool[Math.floor(rng() * tintPool.length)],
     });
-    colliders.addBox(theta, lat, hArc, hLat, arch.wallH + arch.roofH);
+    colliders.addBox(theta, lat, hArc, hLat, arch.wallH + arch.roofH,
+      { kind: 'house', a, i: housePlacements[a].length - 1 });
     // garden hedges flanking the street-facing wall
     if (rng() < 0.6) {
       const c = Math.cos(faceYaw), s = Math.sin(faceYaw);
@@ -281,6 +312,7 @@ function buildCity(scene, textures, colliders, rng) {
 
   // Build house wall + foundation-skirt + roof instanced meshes.
   const foundMat = new THREE.MeshStandardMaterial({ color: 0x5c554d, roughness: 0.95 });
+  const houseMeshes = archetypes.map(() => []);
   archetypes.forEach((arch, i) => {
     if (!housePlacements[i].length) return;
     const wallGeo = new THREE.BoxGeometry(arch.latD, arch.wallH, arch.arcW);
@@ -289,16 +321,31 @@ function buildCity(scene, textures, colliders, rng) {
       map: arch.wall, roughness: 0.9,
       emissiveMap: arch.wallE, emissive: 0xffffff, emissiveIntensity: 0.55,
     });
-    city.add(instancedFrom(wallGeo, wallMat, housePlacements[i]));
+    houseMeshes[i].push(instancedFrom(wallGeo, wallMat, housePlacements[i]));
     // foundation skirt: fill the 1.8 m below the floor so slopes never show
     // floating corners.
     const foundGeo = new THREE.BoxGeometry(arch.latD + 0.3, 1.9, arch.arcW + 0.3);
     foundGeo.translate(0, -0.85, 0);
-    city.add(instancedFrom(foundGeo, foundMat, housePlacements[i], { shadow: false }));
+    houseMeshes[i].push(instancedFrom(foundGeo, foundMat, housePlacements[i], { shadow: false }));
     const roofGeo = gableRoofGeometry(arch.latD, arch.arcW, arch.roofH, arch.wallH, true);
     const roofMat = new THREE.MeshStandardMaterial({ map: arch.roof, roughness: 0.85 });
-    city.add(instancedFrom(roofGeo, roofMat, housePlacements[i]));
+    houseMeshes[i].push(instancedFrom(roofGeo, roofMat, housePlacements[i]));
+    for (const m of houseMeshes[i]) city.add(m);
   });
+  // Last resort for the guideway planner: a home that ended up standing exactly
+  // on the line, with no room to curve round it and no roof to hop, is simply
+  // never built. Rare — houses keep RAIL_KEEP clear of the route by design.
+  const hideHouse = (tag) => {
+    const p = housePlacements[tag.a] && housePlacements[tag.a][tag.i];
+    if (!p || p.hidden) return false;
+    _cityM.makeScale(0, 0, 0);
+    for (const m of houseMeshes[tag.a]) {
+      m.setMatrixAt(tag.i, _cityM);
+      m.instanceMatrix.needsUpdate = true;
+    }
+    p.hidden = true;
+    return true;
+  };
   {
     const hedgeGeo = new THREE.BoxGeometry(0.75, 0.95, 2.3);
     hedgeGeo.translate(0, 0.47, 0);
@@ -586,6 +633,9 @@ function buildCity(scene, textures, colliders, rng) {
           const rl = riverLat(theta), rh = riverHalf(theta);
           if (hi > rl - rh - 2 && lo < rl + rh + 2) continue;
           if (hi > roadLat(theta) - 7 && lo < roadLat(theta) + 7) continue;
+          // nor up the side of a spur, nor into a lake
+          if (onSpur(theta, lo) || onSpur(theta, hi) || onSpur(theta, (lo + hi) / 2)) continue;
+          if (inLake(theta, lo, 2) || inLake(theta, hi, 2) || inLake(theta, (lo + hi) / 2, 2)) continue;
           const pts = [];
           const mid = (lo + hi) / 2;
           for (let k = 0; k <= 10; k++) {
@@ -850,6 +900,7 @@ function buildCity(scene, textures, colliders, rng) {
       // and out of the water rather than trusting the range not to overlap
       if (Math.abs(lat - roadLat(t)) < ROAD_HALF + ROAD_SHLDR + 2.5) continue;
       if (Math.abs(lat - riverLat(t)) < riverHalf(t) + 3) continue;
+      if (onSpur(t, lat) || inLake(t, lat, 3)) continue;
       const stackH = rng() < 0.18 ? 3 : rng() < 0.5 ? 2 : 1;
       for (let sIdx = 0; sIdx < stackH; sIdx++) {
         const cont = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.5, 6),
@@ -918,6 +969,8 @@ function buildCity(scene, textures, colliders, rng) {
       { arcW: 16, latD: 9,  h: 10,   tex: textures.blockC },
     ];
     const blockPlacements = blockTypes.map(() => []);
+    const blockMeshes = blockTypes.map(() => null);
+    const blockRoofMeshes = blockTypes.map(() => null);
     const blockTints = [0xffffff, 0xf0ece4, 0xe6ebf0, 0xf2e6d8].map(c => new THREE.Color(c));
     const PLAZA_C = 6 * DEG;
 
@@ -952,7 +1005,11 @@ function buildCity(scene, textures, colliders, rng) {
         theta, lat, yaw: yaw + (rng() - 0.5) * 0.04,
         tint: blockTints[Math.floor(rng() * blockTints.length)],
       });
-      colliders.addBox(theta, lat, hArc, hLat, t.h);
+      // Tagged so the guideway planner can find its way back to the placement
+      // and bore a tunnel through this tower instead of clipping its corner.
+      colliders.addBox(theta, lat, hArc, hLat, t.h, {
+        kind: 'block', ti, i: blockPlacements[ti].length - 1,
+      });
       return true;
     };
 
@@ -990,7 +1047,8 @@ function buildCity(scene, textures, colliders, rng) {
         map: t.tex.map, roughness: 0.85,
         emissiveMap: t.tex.emissive, emissive: 0xffffff, emissiveIntensity: 0.7,
       });
-      city.add(instancedFrom(wallGeo, wallMat, blockPlacements[ti]));
+      blockMeshes[ti] = instancedFrom(wallGeo, wallMat, blockPlacements[ti]);
+      city.add(blockMeshes[ti]);
 
       const slab = new THREE.BoxGeometry(t.latD + 0.5, 0.35, t.arcW + 0.5);
       slab.translate(0, t.h + 0.17, 0);
@@ -1001,8 +1059,100 @@ function buildCity(scene, textures, colliders, rng) {
       const ant = new THREE.CylinderGeometry(0.05, 0.05, 3.2, 6);
       ant.translate(t.latD * 0.3, t.h + 1.8, t.arcW * 0.3);
       const roofGeo = mergeGeometries([slab, ac1, ac2, ant]);
-      city.add(instancedFrom(roofGeo, roofClutterMat, blockPlacements[ti]));
+      blockRoofMeshes[ti] = instancedFrom(roofGeo, roofClutterMat, blockPlacements[ti]);
+      city.add(blockRoofMeshes[ti]);
     });
+
+    // ── Boring a tunnel through a tower ──────────────────────────────────────
+    // Called by the guideway planner (transit.js) when the monorail's route
+    // cannot be bent around a downtown block. An InstancedMesh cannot have a
+    // hole in it, so the one instance in the way is scaled to nothing and
+    // rebuilt as four boxes: a jamb either side of the bore, a sill under it
+    // and a lintel over it. Their outward faces ARE the tunnel walls — same
+    // texture as the rest of the building, so the bore needs no lining.
+    //
+    // `bore` is given in world terms — { lat, half, y0, y1 }, the guideway's own
+    // lat where it crosses and the height band it needs — and resolved here
+    // into the block's local frame, which is rotated by its street-facing yaw.
+    // Returns the opening, or null if the tower is too small to take the hole
+    // and still keep a jamb either side and a lintel over it.
+    const _uvFaces = (g, w, h, d, ow, oh, od) => {
+      // BoxGeometry lays out 4 verts per face in the order px nx py ny pz nz.
+      // Rescale each face's uv so the window grid keeps the density it had on
+      // the whole box — the offset does not matter, the texture tiles.
+      const f = [[d / od, h / oh], [d / od, h / oh], [w / ow, d / od],
+        [w / ow, d / od], [w / ow, h / oh], [w / ow, h / oh]];
+      const uv = g.attributes.uv;
+      for (let face = 0; face < 6; face++) {
+        for (let k = 0; k < 4; k++) {
+          const i = face * 4 + k;
+          uv.setXY(i, uv.getX(i) * f[face][0], uv.getY(i) * f[face][1]);
+        }
+      }
+      return g;
+    };
+    // Dry run of the geometry test: does this tower have room for the hole and
+    // still keep a jamb either side and a lintel over it? The planner asks
+    // before it commits to a tunnel, so a tower that cannot take one falls back
+    // to being curved around or hopped instead of being deleted.
+    boreFits = function (tag, bore) {
+      const t = blockTypes[tag.ti], p = blockPlacements[tag.ti] && blockPlacements[tag.ti][tag.i];
+      if (!t || !p || p.pierced) return null;
+      const L = t.latD / 2;
+      // local +X runs along lat turned by the block's yaw; at the block's own
+      // theta the arc component is zero, so this is the whole of the offset
+      const want = (bore.lat - p.lat) * Math.cos(p.yaw);
+      const maxOff = L - 0.8 - bore.half;                    // keep a jamb either side
+      if (maxOff < 0) return null;                           // too shallow for a hole
+      const cx = Math.max(-maxOff, Math.min(maxOff, want));
+      // The bore may be nudged off the line to keep its jambs, but only as far
+      // as the deck still fits inside it.
+      if (Math.abs(cx - want) > bore.half - (bore.deckHalf || 1.9)) return null;
+      if (bore.y1 > t.h - 0.8 || bore.y0 < 0.6) return null; // no lintel / no sill
+      return { t, p, cx, x0: cx - bore.half, x1: cx + bore.half };
+    };
+    pierceBlock = function (tag, bore) {
+      const fit = boreFits(tag, bore);
+      if (!fit) return null;
+      const { t, p, cx, x0, x1 } = fit;
+      const L = t.latD / 2;
+      const mk = (w, h, d, x, y, z) =>
+        _uvFaces(new THREE.BoxGeometry(w, h, d), w, h, d, t.latD, t.h, t.arcW)
+          .translate(x, y, z);
+      const parts = [
+        mk(x0 + L, t.h, t.arcW, (x0 - L) / 2, t.h / 2, 0),                       // jamb, −X side
+        mk(L - x1, t.h, t.arcW, (x1 + L) / 2, t.h / 2, 0),                       // jamb, +X side
+        mk(bore.half * 2, bore.y0, t.arcW, cx, bore.y0 / 2, 0),                  // sill
+        mk(bore.half * 2, t.h - bore.y1, t.arcW, cx, (bore.y1 + t.h) / 2, 0),     // lintel
+      ];
+      const mat = blockMeshes[tag.ti].material.clone();
+      if (p.tint) mat.color.copy(p.tint);
+      const mesh = new THREE.Mesh(mergeGeometries(parts), mat);
+      mesh.applyMatrix4(gm(p.theta, p.lat, 0, p.yaw, 1));
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      city.add(mesh);
+      // retire the solid instance
+      _cityM.makeScale(0, 0, 0);
+      blockMeshes[tag.ti].setMatrixAt(tag.i, _cityM);
+      blockMeshes[tag.ti].instanceMatrix.needsUpdate = true;
+      p.pierced = true;
+      return {
+        half: bore.half, y0: bore.y0, y1: bore.y1,
+        arcHalf: t.arcW / 2, theta: p.theta, lat: p.lat, yaw: p.yaw,
+      };
+    };
+    hideBlock = function (tag) {
+      const p = blockPlacements[tag.ti][tag.i];
+      if (!p || p.pierced) return false;
+      _cityM.makeScale(0, 0, 0);
+      for (const m of [blockMeshes[tag.ti], blockRoofMeshes[tag.ti]]) {
+        if (!m) continue;
+        m.setMatrixAt(tag.i, _cityM);
+        m.instanceMatrix.needsUpdate = true;
+      }
+      p.pierced = true;
+      return true;
+    };
   }
 
   // ════ Benches: plazas + all along the ring road ════
@@ -1041,7 +1191,18 @@ function buildCity(scene, textures, colliders, rng) {
     city.add(instancedFrom(benchGeo, benchMat, benchPlacements));
   }
 
-  return { group: city, stations };
+  return {
+    group: city, stations,
+    pierceBlock: (tag, bore) => pierceBlock(tag, bore),
+    boreFits: (tag, bore) => boreFits(tag, bore),
+    // Clear a site the guideway cannot get past: towers and homes alike.
+    clearSite: (tag) => {
+      if (!tag) return false;
+      if (tag.kind === 'block') return hideBlock(tag);
+      if (tag.kind === 'house') return hideHouse(tag);
+      return false;
+    },
+  };
 }
 
 // Small angled-screen terminal kiosk; screen faces the road side.

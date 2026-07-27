@@ -451,10 +451,19 @@ function _mountainH(theta, lat) {
 const _RIVER_H = _normHarm(_harm([
   [6.2, 1], [4.4, 2], [2.6, 3], [1.2, 5],       // valley-wide S-sweep
   [1.6, 8], [1.3, 10], [1.0, 12], [0.8, 14],    // bends inside a street sightline
-]), 13);
+  [0.6, 19], [0.45, 26],                        // kinks you notice from the bank
+]), 15);
 function _riverHarm(theta) { return _evalHarm(_RIVER_H, theta); }
 
-const _HALF_H = _normHarm(_harm([[0.60, 2], [0.40, 3]]), 1.0);
+// Width is its own story, told at a different rate than the meander. Two
+// harmonics gave the channel one slow breath per lap — the same 5.6 m of water
+// everywhere except the four named pools. Carrying content up to k = 13 means
+// the river pinches into a 2 m run between rocks and opens into a 9 m reach
+// several times inside one district, which is what stops a walk along the bank
+// reading as a walk along a canal.
+const _HALF_H = _normHarm(_harm([
+  [0.60, 2], [0.40, 3], [0.34, 5], [0.24, 8], [0.16, 13],
+]), 1.0);
 function _halfUnit(theta) { return _evalHarm(_HALF_H, theta); }
 // Channel half-width: a modest stream most of the way round, opening into the
 // Reservoir Flats lake (~240°), Solace Park's pond (~73°), the Orchards
@@ -473,13 +482,48 @@ const WIDENINGS = [
   { deg: _jit(152, 170), amp: _jit(2.6, 3.8),  sigma: _jit(18, 26) },   // Orchards mill-pond
   { deg: _jit(296, 314), amp: _jit(2.2, 3.4),  sigma: _jit(16, 24) },   // Dock Annex marina inlet
 ];
+// …and three unnamed broads, drawn anywhere the ring will take one. The four
+// above are landmarks — they belong to their districts and have to stay put so
+// the mill and the marina still sit on water. These are the opposite: pure
+// seed, so every world has pools in places the last one didn't. Kept off the
+// spoke collars and the station platforms, which have to stay dry.
+for (let tries = 0, made = 0; tries < 400 && made < 3; tries++) {
+  const deg = _shapeRng() * 360;
+  let ok = _degSep(deg, 6) > 26;                                // the plaza
+  for (const sp of [0, 60, 120, 180, 240, 300]) if (_degSep(deg, sp) < 18) ok = false;
+  for (const st of [13, 70, 183, 266, 334]) if (_degSep(deg, st) < 18) ok = false;
+  for (const g of WIDENINGS) if (_degSep(deg, g.deg) < 26) ok = false;
+  if (!ok) continue;
+  WIDENINGS.push({ deg, amp: _jit(3.0, 6.6), sigma: _jit(13, 24) });
+  made++;
+}
+// Pinches: the other half of "not a canal". A widening alone gives a river that
+// is sometimes fat and otherwise average; a narrowing gives it rapids. These
+// subtract, and the clamp below keeps the channel from ever closing.
+const _NARROWS = (function () {
+  const out = [];
+  for (let tries = 0, made = 0; tries < 500 && made < 5; tries++) {
+    const deg = _shapeRng() * 360;
+    let ok = true;
+    for (const g of WIDENINGS) if (_degSep(deg, g.deg) < g.sigma / 8 + 16) ok = false;
+    for (const n of out) if (_degSep(deg, n.deg) < 24) ok = false;
+    if (!ok) continue;
+    out.push({ deg, amp: _jit(1.8, 3.4), sigma: _jit(9, 17) });
+    made++;
+  }
+  return out;
+})();
 function _riverHalfCore(theta) {
-  let w = 5.6 + 2.2 * _halfUnit(theta);
+  let w = 5.6 + 3.4 * _halfUnit(theta);
   for (let i = 0; i < WIDENINGS.length; i++) {
     const g = WIDENINGS[i];
     w += g.amp * _gaussArc(theta, g.deg, g.sigma);
   }
-  return w;
+  for (let i = 0; i < _NARROWS.length; i++) {
+    const n = _NARROWS[i];
+    w -= n.amp * _gaussArc(theta, n.deg, n.sigma);
+  }
+  return w < 1.8 ? 1.8 : w;
 }
 
 // ── Bank gaps: water's edge → road centerline, water's edge → guideway ──────
@@ -591,12 +635,13 @@ function _riverLatCore(theta) {
 // single-slot cache turns most of those into a compare. roadLat is filled
 // lazily because its avoidance solve runs at module load and would otherwise
 // need itself.
-const _L = { theta: NaN, riverHalf: 0, riverLat: 0, roadLat: NaN };
+const _L = { theta: NaN, riverHalf: 0, riverLat: 0, roadLat: NaN, spurRoad: NaN };
 function _prime(theta) {
   if (theta !== _L.theta) {
     _L.riverHalf = _riverHalfCore(theta);
     _L.riverLat = _riverLatCore(theta);
     _L.roadLat = NaN;
+    _L.spurRoad = NaN;
     _L.theta = theta;
   }
   return _L;
@@ -689,8 +734,52 @@ function _railBounds(theta) {
   return [L.riverLat + L.riverHalf + 8.0, VALLEY_LAT];
 }
 const _railAvoidBuckets = _indexRepulsion(_buildRepulsion(_railBase, RAIL_AVOID, 40, _railBounds));
-function railLat(theta) {
-  let lat = _railBase(theta) + _applyRepulsion(theta, _railAvoidBuckets);
+// ── Late detours: weaving around what actually got built ────────────────────
+// RAIL_AVOID above is the static list — spokes and named set-pieces, known
+// before anything exists. The houses and blocks are not: they are placed by
+// city.js from the world seed AFTER this module has loaded, using railLat to
+// decide where they may stand. So the guideway learns about them last, and
+// transit.js hands them back here as detours before it sweeps any geometry.
+//
+// A detour is a plain Gaussian bump in lat, summed like the static repulsion —
+// which means it goes through the SAME station freeze and the same hard clamp
+// below. It can bend the route around a house; it cannot push the guideway into
+// the river, off the floor, or off a platform, whatever it asks for.
+let _railDetours = [];
+let _railRises = [];
+function _railDetour(theta) {
+  let sum = 0;
+  for (let i = 0; i < _railDetours.length; i++) {
+    const d = _railDetours[i];
+    sum += d.amt * _bump(theta, d.thetaDeg, d.sigma, d.flat);
+  }
+  return sum;
+}
+function railRise(theta) {
+  let sum = 0;
+  for (let i = 0; i < _railRises.length; i++) {
+    const d = _railRises[i];
+    sum += d.amt * _bump(theta, d.thetaDeg, d.sigma, d.flat);
+  }
+  if (sum === 0) return 0;
+  // A hop over a roof must never survive as far as a platform: the car floor
+  // there has to meet the platform deck at exactly 6.0 m.
+  let fade = 1;
+  for (let i = 0; i < STATIONS.length; i++) {
+    const d = Math.abs(arcDelta(theta, STATIONS[i].theta));
+    if (d < 60) fade = Math.min(fade, _smooth(0, 60, d));
+  }
+  return sum * fade;
+}
+// list entries: { thetaDeg, amt, sigma, flat } — amt in metres of lat (detour)
+// or metres of extra deck height (rise).
+function setRailDetours(detours, rises) {
+  _railDetours = detours || [];
+  _railRises = rises || [];
+}
+
+function _railCore(theta, detour) {
+  let lat = _railBase(theta) + _applyRepulsion(theta, _railAvoidBuckets) + detour;
   for (let i = 0; i < STATIONS.length; i++) {
     const st = STATIONS[i];
     const d = Math.abs(arcDelta(theta, st.theta));
@@ -702,6 +791,12 @@ function railLat(theta) {
   const dry = riverLat(theta) + riverHalf(theta) + 8.0;
   return _clamp(Math.max(lat, dry), -12, VALLEY_LAT);
 }
+function railLat(theta) { return _railCore(theta, _railDetour(theta)); }
+// The route WITHOUT the late detours transit.js hands back. The terrain has to
+// be carved before transit.js exists and must not move afterwards, so anything
+// that shapes ground around the guideway (the mountain-spur notches below) uses
+// this fixed line. A detour is a few metres of lat; the notch is far wider.
+function railLatStatic(theta) { return _railCore(theta, 0); }
 // Guideway deck height: rides ~7 m above whatever ground is under it, easing to
 // exactly 6.0 m at each station (station pads are flat spots, so the ground
 // there is the pad's own base height).
@@ -716,8 +811,173 @@ function railH(theta) {
       clear = clear * (1 - w) + 6.0 * w;
     }
   }
-  return ground + clear;
+  return ground + clear + railRise(theta);
 }
+
+// ── Mountain spurs: the rim reaching into the valley ────────────────────────
+// The rim is otherwise two parallel walls, and a valley bounded by two parallel
+// walls is a corridor. A spur is a buttress of that rim thrown across the floor:
+// a ridge that starts up in the crags, runs inward, and either dies as a
+// headland part way across or carries all the way to the far rim.
+//
+// Nothing negotiates with a spur. The three ribbons are already fixed by the
+// time one is drawn, so the spur yields to THEM: its height is multiplied by
+// (1 − corridor), which cuts a notch through the ridge wherever the road, the
+// guideway or the river passes. Where the spur is shallow that notch is a col
+// you drive over; where it is deep it is a slot with 20 m of rock either side,
+// and world.js roofs those into tunnels. So "goes around or tunnels through"
+// falls out of one multiply instead of a routing solver — and it cannot fail,
+// because a corridor that cannot be carved simply isn't possible here.
+//
+// Placement is the only thing with taste in it: spurs stay off the stations,
+// the spoke collars, the plaza and the Cascade (whose gorge is already a hole
+// in this rim), and off each other.
+const SPUR_ROAD_W = ROAD_HALF + ROAD_SHLDR + 1.4;   // full-depth notch half-width
+const SPUR_RAIL_W = 6.4;
+// Notch wall run-out. Kept short on purpose: a long batter opens the slot into
+// a trench you could land a shuttle in, and a roof over a trench that wide is
+// not a tunnel. Short batter + the road bench pulled in below = rock rising
+// close enough to the shoulder that the vault has something to spring off.
+const SPUR_BATTER = 7.0;
+const SPURS = (function () {
+  const out = [];
+  const clear = (deg, halfDeg) => {
+    for (const st of STATIONS) if (_degSep(deg, st.thetaDeg) < 15 + halfDeg) return false;
+    for (const sp of [0, 60, 120, 180, 240, 300]) if (_degSep(deg, sp) < 11 + halfDeg) return false;
+    if (_degSep(deg, 6) < 16 + halfDeg) return false;               // Meridian Plaza
+    if (_degSep(deg, CASCADE_DEG) < 16 + halfDeg) return false;
+    for (const s of out) if (_degSep(deg, s.deg) < 26) return false;
+    return true;
+  };
+  const want = 4 + Math.floor(_layRng() * 3);            // 4..6
+  let guard = 0;
+  while (out.length < want && guard++ < 900) {
+    const halfArc = 22 + _layRng() * 24;                 // crest half-width, metres of arc
+    const feather = 26 + _layRng() * 22;                 // shoulders beyond the crest
+    const deg = _layRng() * 360;
+    if (!clear(deg, (halfArc + feather) / RF / DEG)) continue;
+    const side = _layRng() < 0.5 ? -1 : 1;
+    // A third of them cross the whole valley. Any more and the ring reads as a
+    // chain of separate rooms rather than one long landscape.
+    const crosses = _layRng() < 0.34;
+    // Signed lat the ridge dies at. A headland stops somewhere in the fields on
+    // its own side or just past the middle; a crossing spur runs into the
+    // opposite rim, so its tip is behind the far mountains' own foot.
+    const tipLat = crosses
+      ? -side * (VALLEY_LAT + 6)
+      : side * (2 + _layRng() * 26);
+    out.push({
+      deg, theta: deg * DEG, s: deg * DEG * RF, side, crosses,
+      tipLat, tipQ: tipLat * side,                        // tipQ: tip in "toward my rim" coords
+      halfArc, feather,
+      h: (crosses ? 30 : 24) + _layRng() * 16,
+    });
+  }
+  return out;
+})();
+
+// Height the spurs WANT, before the corridors get their say.
+function _spurRaw(theta, lat) {
+  let add = 0;
+  for (let i = 0; i < SPURS.length; i++) {
+    const sp = SPURS[i];
+    const d = arcDelta(sp.theta, theta);
+    const ad = d < 0 ? -d : d;
+    if (ad > sp.halfArc + sp.feather) continue;
+    // q measures lat in the spur's own direction: it grows from the tip toward
+    // the rim the spur grew out of, whichever side that is.
+    const q = lat * sp.side;
+    const run = q - sp.tipQ;
+    if (run <= 0) continue;
+    // Fade out INTO the crest rather than at some fixed lat: past the rim's own
+    // foot the mountain is already this tall, and adding a spur on top of it
+    // built a spike on the skyline.
+    const wLat = _smooth(0, 17, run) * (1 - _smooth(MTN_LAT0 - 8, MTN_CREST - 4, q));
+    if (wLat <= 0) continue;
+    const wArc = ad <= sp.halfArc ? 1 : 1 - _smooth(sp.halfArc, sp.halfArc + sp.feather, ad);
+    // Same ridged noise as the rim, so a spur is visibly the same rock.
+    const rough = 0.55 + 0.80 * _mtnFbm(theta, lat, sp.side);
+    const taper = 0.50 + 0.50 * _clamp01(run / 58);      // lower at the tip
+    add += sp.h * wArc * wLat * taper * rough;
+  }
+  return add;
+}
+// How much the ground at (theta, lat) belongs to a corridor: 1 on the roadway,
+// the guideway or the water, easing to 0 up the batter. This is what turns a
+// ridge into a ridge with a slot through it.
+function _corridorRelief(theta, lat) {
+  let m = 1 - _smooth(SPUR_ROAD_W, SPUR_ROAD_W + SPUR_BATTER, Math.abs(lat - roadLat(theta)));
+  if (m < 0.999) {
+    const r = 1 - _smooth(SPUR_RAIL_W, SPUR_RAIL_W + SPUR_BATTER, Math.abs(lat - railLatStatic(theta)));
+    if (r > m) m = r;
+  }
+  if (m < 0.999) {
+    const L = _prime(theta);
+    const w = 1 - _smooth(L.riverHalf + 3.0, L.riverHalf + 3.0 + SPUR_BATTER, Math.abs(lat - L.riverLat));
+    if (w > m) m = w;
+  }
+  return m;
+}
+function spurH(theta, lat) {
+  const raw = _spurRaw(theta, lat);
+  if (raw <= 0.001) return 0;
+  return raw * (1 - _corridorRelief(theta, lat));
+}
+// True where a spur stands high enough that nothing should be built or planted.
+function onSpur(theta, lat) { return spurH(theta, lat) > 2.0; }
+// Metres of rock standing over the carriageway here, memoised per theta because
+// terrainH sweeps every lat at one theta and asks for this at each of them.
+function spurOverRoad(theta) {
+  const L = _prime(theta);
+  if (L.spurRoad !== L.spurRoad) L.spurRoad = _spurRaw(theta, roadLat(theta));
+  return L.spurRoad;
+}
+
+// ── Where a corridor is actually inside the rock ────────────────────────────
+// Sweep each ribbon and keep the contiguous stretches where the spur it is
+// passing through is deep enough to roof. world.js and transit.js build the
+// portals and the vault from these; nothing about the ground depends on them,
+// so a mis-tuned threshold costs dressing, never walkability.
+function _boreRuns(latFn, minCrown) {
+  const N = 4096, arc = CIRCUMFERENCE / N;
+  const dep = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const theta = (i / N) * Math.PI * 2;
+    dep[i] = _spurRaw(theta, latFn(theta));
+  }
+  // Start the sweep on a sample that is NOT inside rock, so a bore straddling
+  // θ = 0 comes back as one tunnel instead of two halves at the seam.
+  let start = 0;
+  while (start < N && dep[start] > minCrown) start++;
+  if (start === N) return [];
+  const out = [];
+  let run = null;
+  for (let k = 0; k < N; k++) {
+    const i = (start + k) % N;
+    if (dep[i] > minCrown) {
+      if (!run) run = { s0: (start + k) * arc, s1: (start + k + 1) * arc, crown: dep[i] };
+      else { run.s1 = (start + k + 1) * arc; if (dep[i] > run.crown) run.crown = dep[i]; }
+    } else if (run) {
+      if (run.s1 - run.s0 >= 16) out.push(run);
+      run = null;
+    }
+  }
+  if (run && run.s1 - run.s0 >= 16) out.push(run);
+  // s (and therefore theta) may run past one lap here. Everything downstream is
+  // periodic, and keeping the run continuous is what lets a caller sweep it.
+  return out.map(r => ({
+    s0: r.s0, s1: r.s1, len: r.s1 - r.s0, crown: r.crown,
+    theta0: r.s0 / RF, theta1: r.s1 / RF, thetaMid: (r.s0 + r.s1) / 2 / RF,
+  }));
+}
+
+// Thresholds are the depth of rock over the corridor, so they differ: the
+// carriageway sits on the ground and wants 8 m over it before a roof is worth
+// building, while the guideway deck already rides ~7 m up and needs half again
+// as much before there is a mountain left above it. The river gets no roof at
+// all — an open gorge with the water running through it is the better sight.
+const ROAD_TUNNELS = _boreRuns(roadLat, 8.0);
+const RAIL_TUNNELS = _boreRuns(railLatStatic, 14.0);
 
 // ── Hillside tributaries ────────────────────────────────────────────────────
 // Small streams that come down off the −lat hillside, pass under the ring road
@@ -935,6 +1195,86 @@ function _knollBump(theta, lat) {
   return add;
 }
 
+// ── Standing lakes ──────────────────────────────────────────────────────────
+// Water that is not the river. The four named pools are widenings of the
+// channel, which means every drop of water in the ring used to be on one line —
+// walk 40 m off the bank in any district and you were done with water for the
+// rest of the lap. These are separate bodies out in the fields: a bowl carved
+// below the waterline, filled to the same WATER_H datum as everything else, so
+// wading, swimming, the depth tint and the shoreline shingle all work on them
+// for free.
+//
+// The rim is a few harmonics of the bearing angle rather than a circle, because
+// a circular lake reads as a crater — and it is an ELLIPSE before those
+// harmonics, long along the arc and short across it. That is not a stylistic
+// choice: the valley is only ~100 m of usable lat and the middle 50 of it is
+// spoken for by the three corridors, so a round lake big enough to be a lake
+// does not fit anywhere. A long one lying along the valley does.
+//
+// Filled AFTER _rawTerrain exists (they are rejected against the real
+// landscape — a bowl on a rise is a dry pit), so the carve stays inert until
+// `_lakesReady`, exactly like the Cascade's.
+const LAKES = [];
+let _lakesReady = false;
+// Rim radius in the lake's own normalised frame (1 = the plain ellipse), as a
+// function of bearing. world.js meshes the sheet off this, so it has to be the
+// same call the carve uses or the water would not sit in its own bowl.
+function lakeRim(lk, ang) {
+  return 1 + 0.24 * Math.sin(2 * ang + lk.p1)
+           + 0.14 * Math.sin(3 * ang + lk.p2)
+           + 0.08 * Math.sin(5 * ang + lk.p3);
+}
+// Where (theta, lat) sits inside a lake, in the same normalised frame:
+// { m } is the radius of the sample and { r } the rim on its bearing.
+function lakePoint(lk, ang, m) {
+  return {
+    theta: lk.theta + Math.cos(ang) * lk.ra * m / RF,
+    lat: lk.lat + Math.sin(ang) * lk.rl * m,
+  };
+}
+// How far inside the lake (theta, lat) is: 1 at the middle, 0 at the shore and
+// outside. `grow` inflates both semi-axes by that many metres.
+function _lakeT(lk, theta, lat, grow) {
+  let ds = theta * RF - lk.s;
+  if (ds > CIRCUMFERENCE / 2) ds -= CIRCUMFERENCE;
+  if (ds < -CIRCUMFERENCE / 2) ds += CIRCUMFERENCE;
+  const ra = lk.ra + grow, rl = lk.rl + grow;
+  if (ds < -ra * 1.4 || ds > ra * 1.4) return 0;
+  const dl = lat - lk.lat;
+  if (dl < -rl * 1.4 || dl > rl * 1.4) return 0;
+  const x = ds / ra, y = dl / rl;
+  const d = Math.hypot(x, y);
+  if (d < 1e-6) return 1;
+  const r = lakeRim(lk, Math.atan2(y, x));
+  return d >= r ? 0 : 1 - d / r;
+}
+// The bed a lake wants at `t` metres-in, as an ABSOLUTE height rather than a
+// depth to subtract. That distinction is the whole thing: subtracting a fixed
+// bowl from ground that happens to be sloping gives a crater with the water
+// pooled in one corner of it and forty metres of dry sand up the other side.
+// Blending the ground TOWARD a flat bed puts the shoreline wherever the blend
+// crosses the waterline, which is what a lake does.
+function _lakeBed(lk, t) { return WATER_H - lk.depth * (0.35 + 0.65 * t); }
+function _lakeBlend(theta, lat, h) {
+  if (!_lakesReady) return h;
+  for (let i = 0; i < LAKES.length; i++) {
+    const lk = LAKES[i];
+    const t = _lakeT(lk, theta, lat, 0);
+    if (t <= 0) continue;
+    // zero at the rim, so the bank is exactly the ground that was already there
+    h += (_lakeBed(lk, t) - h) * _smooth(0, 0.46, t);
+  }
+  return h;
+}
+// Inside a lake's footprint (plus `pad`) — for the placers, which have no other
+// way to know a field is now under water.
+function inLake(theta, lat, pad = 0) {
+  for (let i = 0; i < LAKES.length; i++) {
+    if (_lakeT(LAKES[i], theta, lat, pad) > 0) return true;
+  }
+  return false;
+}
+
 // ── Terrain ─────────────────────────────────────────────────────────────────
 // Σ|A| = 5.42. Each octave is a product of an arc harmonic and a lat wave, so
 // the rolling ground changes as you walk across the valley as well as along it.
@@ -983,7 +1323,7 @@ function _rawTerrain(theta, lat) {
   const rl = L.riverLat, rh = L.riverHalf;
   const u = Math.abs(lat - rl);
 
-  let h = sideProfile(lat) + _mountainH(theta, lat);
+  let h = sideProfile(lat) + _mountainH(theta, lat) + spurH(theta, lat);
   let soil = FLOODPLAIN;
   soil += _hills(theta, lat) * _smooth(rh + 2, rh + 26, u);   // no bumps inside the channel
   soil -= 0.9 * (1 - _smooth(rh + 3, rh + 40, u));            // land tips gently toward the water
@@ -1001,9 +1341,106 @@ function _rawTerrain(theta, lat) {
     const bed = WATER_H - RIVER_DEPTH * Math.pow(1 - t * t, 0.75);
     h = h * (1 - w) + bed * w;
   }
+  // Lakes reach BELOW the soft floor on purpose — that floor exists to stop the
+  // rolling hills accidentally dipping under the waterline, and a lake is the
+  // one place we mean it.
+  h = _lakeBlend(theta, lat, h);
   h += _islandBump(theta, lat) + _knollBump(theta, lat) * edgeFade;
   return _cascadeCarve(theta, lat, h);
 }
+
+// ── Filling the lakes ───────────────────────────────────────────────────────
+// Rejection sampling against everything already committed: the three corridors,
+// the set-piece pads, the knolls, the spurs, the Cascade's run-out, and each
+// other. The last test is the one that matters — dig the bowl on paper and
+// check it actually reaches below the waterline, because a lake on a rise is a
+// dry hole in the middle of a field and nothing downstream would notice.
+(function () {
+  const clearOf = (theta, lat, reach) => {
+    const rl = riverLat(theta), rh = riverHalf(theta);
+    if (Math.abs(lat - rl) < rh + reach + 7) return false;
+    if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + reach + 4) return false;
+    if (Math.abs(lat - railLatStatic(theta)) < reach + 8) return false;
+    if (Math.abs(lat) + reach > VALLEY_LAT - 3) return false;
+    if (_spurRaw(theta, lat) > 0.5) return false;
+    const spots = _spotsNear(theta);
+    for (let i = 0; i < spots.length; i++) {
+      const f = spots[i];
+      if (Math.hypot(arcDelta(theta, f.theta), lat - f.lat) < f.r + f.feather + reach + 4) return false;
+    }
+    for (const k of KNOLLS) {
+      if (Math.hypot(arcDelta(theta, k.theta), lat - k.lat) < k.r + reach + 5) return false;
+    }
+    for (const t of TRIBS) {
+      const q = _tribDist(t, theta * RF, lat);
+      if (q.d < reach + 6) return false;
+    }
+    return true;
+  };
+  const want = 5 + Math.floor(_layRng() * 4);          // 5..8
+  let guard = 0;
+  while (LAKES.length < want && guard++ < 9000) {
+    const theta = _layRng() * Math.PI * 2;
+    if (_degSep(theta / DEG, CASCADE_DEG) < 14) continue;
+    const rl = 8 + _layRng() * 10;                     // 8..18 m across the valley
+    const ra = rl * (1.6 + _layRng() * 2.2);           // 13..68 m along it
+    // Don't sample lat blind. Between the outer corridor and the mountain foot
+    // there is one usable band per side and it is narrow — 20-odd metres, and
+    // it moves as the road and the guideway wander. Sampling ±52 uniformly and
+    // rejecting threw away 99% of candidates and left the ring with one pond.
+    // Ask where the band IS at this theta, then sit in it.
+    const side = _layRng() < 0.5 ? -1 : 1;
+    const inner = side < 0
+      ? roadLat(theta) - (ROAD_HALF + ROAD_SHLDR + 5) - rl * 1.2
+      : railLatStatic(theta) + 8 + rl * 1.2;
+    const outer = side * (VALLEY_LAT - 4) - side * rl * 1.2;
+    if ((outer - inner) * side < 2) continue;          // no room on this side here
+    const lat = inner + (outer - inner) * _layRng();
+    const lk = {
+      theta, s: theta * RF, lat, ra, rl,
+      depth: 3.0 + _layRng() * 2.8,
+      p1: _layRng() * _TAU, p2: _layRng() * _TAU, p3: _layRng() * _TAU,
+    };
+    // The perimeter, not just the centre — sampled in the ellipse's own frame.
+    let ok = true;
+    for (let a = 0; a < 16 && ok; a++) {
+      const ang = (a / 16) * _TAU;
+      const x = Math.cos(ang), y = Math.sin(ang);
+      for (const f of [0.55, 1.15]) {
+        const th = theta + x * ra * f / RF, la = lat + y * rl * f;
+        if (!clearOf(th, la, 2)) { ok = false; break; }
+      }
+    }
+    if (!ok || !clearOf(theta, lat, 2)) continue;
+    for (const o of LAKES) {
+      if (Math.abs(arcDelta(theta, o.theta)) < ra + o.ra + 16 &&
+          Math.abs(lat - o.lat) < rl + o.rl + 16) { ok = false; break; }
+    }
+    if (!ok) continue;
+    // Does it hold water, all the way round? Test near the RIM, not in the
+    // middle: at the middle the blend has already reached the flat bed, so the
+    // answer is trivially yes for any site whatever, including a site on a 1:3
+    // hillside where the finished thing is a puddle at the bottom of a quarry.
+    // At 0.70 of the radius the ground still has a real say, so a hillside shows
+    // up as dry bearings and the candidate is thrown out. Two may fail — that is
+    // a shelving beach on one shore, which is a feature, not a fault.
+    let dryBearings = 0;
+    for (let a = 0; a < 12; a++) {
+      const ang = (a / 12) * _TAU;
+      const f = 0.70, t = 1 - f;
+      const g = _rawTerrain(theta + Math.cos(ang) * ra * f / RF, lat + Math.sin(ang) * rl * f);
+      if (g + (_lakeBed(lk, t) - g) * _smooth(0, 0.46, t) > WATER_H - 0.15) dryBearings++;
+    }
+    if (dryBearings > 2) continue;
+    LAKES.push(lk);
+  }
+  _lakesReady = true;
+  if (typeof console !== 'undefined') {
+    console.log(`[layout] ${LAKES.length} lakes, ${SPURS.length} mountain spurs ` +
+      `(${SPURS.filter(s => s.crosses).length} crossing), ` +
+      `${ROAD_TUNNELS.length} road tunnels, ${RAIL_TUNNELS.length} rail tunnels`);
+  }
+})();
 
 // ── The Cascade ─────────────────────────────────────────────────────────────
 // A gorge cut into the inner face of the +lat mountain rim: a hanging gully at
@@ -1214,10 +1651,15 @@ function terrainH(theta, lat) {
   // let a pad's circular falloff re-impose its own height across the roadway,
   // which put 50%+ grades into the road wherever one clipped it.
   const dRoad = Math.abs(lat - roadLat(theta));
-  if (dRoad < ROAD_HALF + ROAD_SHLDR + 15) {
-    // a long batter, not a sheer face: cuttings can be 4-5 m deep where the
-    // smoothed grade runs across a rising hillside
-    const w = 1 - _smooth(ROAD_HALF + ROAD_SHLDR + 1.0, ROAD_HALF + ROAD_SHLDR + 15, dRoad);
+  // A long batter, not a sheer face: cuttings can be 4-5 m deep where the
+  // smoothed grade runs across a rising hillside. Inside a mountain spur the
+  // batter is pulled in hard — out at its usual 15 m it drags the notch open
+  // into a 30 m trench, and a 30 m trench with a roof over it is not a tunnel,
+  // it is a roofed canyon. Short batter, near-vertical rock, a portal you can
+  // see the far end of.
+  const batter = ROAD_HALF + ROAD_SHLDR + 15 - 11.0 * _clamp01(spurOverRoad(theta) / 12);
+  if (dRoad < batter) {
+    const w = 1 - _smooth(ROAD_HALF + ROAD_SHLDR + 1.0, batter, dRoad);
     h = h * (1 - w) + roadH(theta) * w;
   }
   return h;
@@ -1357,6 +1799,22 @@ function laneSample(lane, t) {
   return { theta: th, lat: la, yaw: Math.atan2(dla, dth * RF) };
 }
 
+// A footpath has no business climbing the flank of a spur or wading a lake, and
+// both arrived after the lanes were written. Walk the control point back toward
+// the corridor the lane hangs off until it is on ground someone would use —
+// which, at a spur, is exactly the notch the road or the guideway goes through.
+function laneClear(theta, lat, bank) {
+  const anchor = bank < 0 ? roadLat(theta) : railLatStatic(theta);
+  let out = lat;
+  for (let k = 0; k < 30; k++) {
+    if (spurH(theta, out) < 2.0 && !inLake(theta, out, 2)) return out;
+    const step = anchor - out;
+    if (step > -0.05 && step < 0.05) break;
+    out += step * 0.16 + (step > 0 ? 0.5 : -0.5);
+  }
+  return anchor + (bank < 0 ? -7 : 7);
+}
+
 const LANES = (function () {
   const lanes = [];
   const perKind = { houses: 4, farm: 3, park: 2, orchard: 2, market: 2, science: 2, industry: 2, plaza: 1, water: 2 };
@@ -1364,8 +1822,8 @@ const LANES = (function () {
   // river; a far-bank lane stays above it. Both keep 3 m off the water.
   const clampToBank = (theta, lat, bank) => {
     const rl = riverLat(theta), rh = riverHalf(theta);
-    if (bank < 0) return Math.min(lat, rl - rh - 3.5);
-    return Math.max(lat, rl + rh + 3.5);
+    const l = bank < 0 ? Math.min(lat, rl - rh - 3.5) : Math.max(lat, rl + rh + 3.5);
+    return laneClear(theta, l, bank);
   };
   for (const d of DISTRICTS) {
     const n = perKind[d.kind] ?? 2;
@@ -1466,9 +1924,12 @@ const LAYOUT_CHECK = (function () {
 if (typeof window !== 'undefined') {
   window.__layout = {
     roadLat, roadYawAt, riverLat, riverHalf, riverDrawHalf, riverSep, railLat, railH,
+    setRailDetours,
     STATIONS, terrainH, groundH, roadH, waterDepth, terrainSlope, sideProfile,
     FLAT_SPOTS, LANES, laneSample, addHeightPatch, CROSSINGS, TRIBS, RIVER_BRIDGES,
     ISLANDS, onIsland, KNOLLS, tribEdges, waterEdges, LAYOUT_CHECK,
     mountainH: _mountainH, CASCADE,
+    SPURS, spurH, onSpur, ROAD_TUNNELS, RAIL_TUNNELS,
+    LAKES, inLake, lakeT: _lakeT, lakeRim, lakePoint, railLatStatic,
   };
 }
