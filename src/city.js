@@ -147,12 +147,21 @@ function buildCity(scene, textures, colliders, rng) {
   };
   // Is (theta, lat) a legal home site? Off the road, out of the river, clear of
   // station platforms, and not overlapping an existing obstacle.
+  // The road and the river are curves, not lat bands: over a 16 m-wide
+  // building either can move several metres, so a clearance measured only at
+  // the centre lets one corner of the footprint sit on the carriageway. Test
+  // both ends of the arc extent as well.
+  const clearOfCorridors = (theta, lat, hArc, hLat) => {
+    for (const ds of [-hArc, 0, hArc]) {
+      const th = theta + ds / RF;
+      if (Math.abs(lat - roadLat(th)) < ROAD_HALF + ROAD_SHLDR + 1.5 + hLat) return false;
+      if (Math.abs(lat - riverLat(th)) < riverHalf(th) + 3 + hLat) return false;
+    }
+    return true;
+  };
   const houseSiteOK = (theta, lat, half, hArc, hLat) => {
     if (Math.abs(lat) + hLat > BUILD_LAT) return false;
-    // Measured from the FOOTPRINT, not the centre: a 12 m-wide house whose
-    // centre clears the road by 7.5 m still overhangs the carriageway by 5 m.
-    if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + 1.5 + hLat) return false;
-    if (Math.abs(lat - riverLat(theta)) < riverHalf(theta) + 3 + hLat) return false;
+    if (!clearOfCorridors(theta, lat, hArc, hLat)) return false;
     if (nearStationZone(theta, lat, hArc, hLat)) return false;
     return !colliders.resolve(theta * RF, lat, 1.2, half);
   };
@@ -931,10 +940,12 @@ function buildCity(scene, textures, colliders, rng) {
         lat = inward;
         // A slid site no longer sits at its designed offset from the road, so
         // the usual road/rail clearance is no longer implied — check it.
-        if (Math.abs(lat - roadLat(theta)) < ROAD_HALF + ROAD_SHLDR + 1.5 + hLat) return false;
         if (Math.abs(lat - railLat(theta)) < RAIL_HALF + 2 + hLat) return false;
       }
-      if (Math.abs(lat - riverLat(theta)) < riverHalf(theta) + 4) return false;
+      // Across the whole arc extent, not just at the centre — see
+      // clearOfCorridors. A 16 m block reaches 8 m either way, and the road
+      // wanders enough over that span to end up under one corner of it.
+      if (!clearOfCorridors(theta, lat, hArc, hLat)) return false;
       if (nearStationZone(theta, lat, hArc, hLat)) return false;   // keep platforms clear
       if (colliders.resolve(theta * RF, lat, 1, halfDiag)) return false;
       blockPlacements[ti].push({

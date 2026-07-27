@@ -9,6 +9,7 @@ class GravitySystem {
     this.mode = 'stable';          // stable | spindown | zerog | spinup
     this.timer = FIRST_FAILURE_AT; // until next event in current mode
     this.stabilized = false;
+    this.liftSmoothed = 0;
     this.onEvent = () => {};       // (name) => {}  name: failing|zero|recovering|restored
   }
 
@@ -98,5 +99,6 @@ class GravitySystem {
       }
     }
     this.spinAngle += this.spin * dt;
+    this._updateLift(dt);
   }
 }

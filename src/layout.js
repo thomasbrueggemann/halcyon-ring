@@ -38,6 +38,42 @@ function _layMulberry32(seed) {
   };
 }
 const _layRng = _layMulberry32((WORLD_SEED ^ 0x5eed) >>> 0);
+// A second stream, used ONLY for the shape of the ring (the harmonic phases
+// below). Keeping it separate means adding or removing a harmonic doesn't
+// reshuffle the knolls and the lanes, which draw from _layRng.
+const _shapeRng = _layMulberry32((WORLD_SEED ^ 0x9a17e5) >>> 0);
+const _TAU = Math.PI * 2;
+const _jit = (a, b) => a + _shapeRng() * (b - a);
+
+// ── Seeded harmonic series ──────────────────────────────────────────────────
+// Every long curve in the ring — the river, the bank gaps, the hills, the
+// mountain crest — used to be a hard-coded sum of sines with hand-tuned phases,
+// which meant every ring ever generated was the same ring. They are built from
+// the seed now: the AMPLITUDES stay (they are what makes a river read as a
+// river and not as a noise field), the phases are drawn per world, and the
+// whole series is then normalised to a known peak.
+//
+// That last step is what makes randomising safe. Σ|A| for the river is 19.1 m
+// but a tuned phase set only ever reached ±13; a random one could reach the
+// full 19 and shove the guideway into its clamp for a whole district. Measuring
+// the actual peak and scaling to it gives every seed the same envelope.
+function _harm(terms) {
+  return terms.map(([A, k]) => ({ A, k, p: _shapeRng() * _TAU }));
+}
+function _evalHarm(t, theta) {
+  let s = 0;
+  for (let i = 0; i < t.length; i++) s += t[i].A * Math.sin(t[i].k * theta + t[i].p);
+  return s;
+}
+function _normHarm(t, peak) {
+  let m = 0;
+  for (let i = 0; i < 2048; i++) {
+    const v = Math.abs(_evalHarm(t, (i / 2048) * _TAU));
+    if (v > m) m = v;
+  }
+  if (m > 1e-6) { const f = peak / m; for (const x of t) x.A *= f; }
+  return t;
+}
 
 function _smooth(a, b, x) {
   if (a === b) return x < a ? 0 : 1;
@@ -56,6 +92,18 @@ function _gaussArc(theta, centerDeg, sigma) {
 // The Cascade's course is measured off the un-carved landscape, so the carve
 // stays inert until the table below it exists. See _cascadeCarve / CASCADE.
 let _cascadeReady = false;
+
+// Repulsion bump: FLAT over the obstacle's own footprint, then gaussian
+// shoulders. A pure gaussian only guarantees clearance at the obstacle's exact
+// theta — 30 m of arc later it has decayed to 40% and the ribbon has swung
+// most of the way back, which is how the ring road ended up driving through the
+// side of the observatory while the centre-line check reported everything fine.
+function _bump(theta, centerDeg, sigma, flat) {
+  const d = Math.abs(arcDelta(theta, centerDeg * DEG));
+  if (d <= flat) return 1;
+  const x = d - flat;
+  return Math.exp(-(x * x) / (2 * sigma * sigma));
+}
 
 // ── Smooth obstacle repulsion (unchanged machinery) ─────────────────────────
 // Build a list of {thetaDeg, sigma, amt} smooth repulsion bumps from a base
@@ -78,18 +126,38 @@ function _clusterObstacles(obstacles, gapM = 10) {
   const clusters = [];
   for (const o of sorted) {
     const last = clusters[clusters.length - 1];
-    if (last && Math.abs(arcDelta(last[last.length - 1].thetaDeg * DEG, o.thetaDeg * DEG)) < gapM) last.push(o);
+    const prev = last && last[last.length - 1];
+    // Two obstacles interfere as soon as their PLATEAUS overlap, not just when
+    // their centres are close: at a shared theta both bumps are at full
+    // strength, so the independent-bump iteration cannot satisfy either and
+    // oscillates. Solve those as one interval problem instead.
+    const reach = prev ? Math.max(gapM, (prev.flat || 0) + (o.flat || 0) + 30) : gapM;
+    if (prev && Math.abs(arcDelta(prev.thetaDeg * DEG, o.thetaDeg * DEG)) < reach) last.push(o);
     else clusters.push([o]);
   }
   return clusters;
 }
-function _buildRepulsion(baseFn, obstacles, passes = 40) {
+// `boundsFn(theta) -> [lo, hi]` is the legal lat window for the ribbon at that
+// theta — for the road, "not in the water and not up the mountain". Without it
+// the solver optimises a function the caller then clamps behind its back: it
+// happily pushes the road toward the river to clear a building on the −lat
+// side, the wet clamp undoes the push, and the carriageway ends up driving
+// through the building anyway. With hand-tuned harmonics that never quite
+// happened; with a fresh river every world it happens constantly. Knowing the
+// window, the solver can pick the OTHER side of the obstacle instead.
+function _buildRepulsion(baseFn, obstacles, passes = 40, boundsFn = null) {
   const clusters = _clusterObstacles(obstacles);
   const fixedTerms = [];   // multi-obstacle clusters, solved once, exactly
   const single = [];       // size-1 clusters, solved iteratively against each other
   for (const cluster of clusters) {
     if (cluster.length === 1) { single.push(cluster[0]); continue; }
-    const thetaDeg = cluster.reduce((s, o) => s + o.thetaDeg, 0) / cluster.length;
+    // Centre and plateau of the CLUSTER, not of its members: three coolant
+    // tanks spread over 6° of arc need one bump 100 m wide, and averaging their
+    // angles while keeping a single tank's 12 m plateau left the outer two
+    // sitting on the shoulder — which is to say, in the road.
+    const lo = Math.min(...cluster.map(o => o.thetaDeg));
+    const hi = Math.max(...cluster.map(o => o.thetaDeg));
+    const thetaDeg = (lo + hi) / 2;
     const theta = thetaDeg * DEG;
     const base = baseFn(theta);
     const margin = 0.5;
@@ -100,26 +168,57 @@ function _buildRepulsion(baseFn, obstacles, passes = 40) {
       else mg.push(iv.slice());
     }
     const inForbidden = (v) => mg.some(iv => v >= iv[0] && v <= iv[1]);
-    let best = base, bestD = 0;
+    const sigma = Math.max(...cluster.map(o => o.sigma));
+    const flat = Math.abs(arcDelta(lo * DEG, hi * DEG)) / 2 + Math.max(...cluster.map(o => o.flat || 0));
+
+    // The bump is a constant OFFSET but the base underneath it is not constant,
+    // and a cluster plateau can now be 100 m wide — wide enough for the base to
+    // wander 12 m across it. Solving at the centre alone therefore left the
+    // outer members of the cluster back inside the forbidden band. Size the
+    // offset off the worst point of the plateau instead, so the whole span
+    // clears; over-clearing in the middle costs nothing.
+    const samples = [];
+    for (let s = -flat; s <= flat; s += Math.max(2, flat / 12)) samples.push(baseFn(theta + s / RF));
+    if (!samples.length) samples.push(base);
+
+    let amt = 0;
     if (inForbidden(base)) {
-      bestD = Infinity;
       const cands = [mg[0][0]];
       for (let i = 0; i < mg.length - 1; i++) cands.push(mg[i][1]);
       cands.push(mg[mg.length - 1][1]);
-      for (const c of cands) { const d = Math.abs(c - base); if (d < bestD) { bestD = d; best = c; } }
+      const b = boundsFn ? boundsFn(theta) : null;
+      // Score each candidate by the clearance it ACTUALLY delivers once the
+      // caller's hard clamp has had its say — not by how far it asks the
+      // ribbon to move. Sometimes both sides of a cluster leave the legal
+      // window, and then the question is which one the clamp treats better:
+      // pushed against the far limit you still end up 50 m clear, pushed
+      // against the near one you end up in the fountain.
+      let bestScore = -Infinity, bestAbs = Infinity;
+      for (const c of cands) {
+        const below = c <= (mg[0][0] + mg[mg.length - 1][1]) / 2;
+        let a = below ? Infinity : -Infinity;
+        for (const bs of samples) a = below ? Math.min(a, c - bs) : Math.max(a, c - bs);
+        let score = Infinity;
+        for (const bs of samples) {
+          const v = b ? Math.min(Math.max(bs + a, b[0]), b[1]) : bs + a;
+          for (const o of cluster) score = Math.min(score, Math.abs(v - o.lat) - o.minSep);
+        }
+        if (score > bestScore + 0.01 || (Math.abs(score - bestScore) <= 0.01 && Math.abs(a) < bestAbs)) {
+          bestScore = score; bestAbs = Math.abs(a); amt = a;
+        }
+      }
     }
-    const sigma = Math.max(...cluster.map(o => o.sigma));
-    fixedTerms.push({ thetaDeg, sigma, amt: best - base });
+    fixedTerms.push({ thetaDeg, sigma, flat, amt });
   }
 
-  const terms = single.map(o => ({ thetaDeg: o.thetaDeg, lat: o.lat, minSep: o.minSep, sigma: o.sigma, amt: 0 }));
+  const terms = single.map(o => ({ thetaDeg: o.thetaDeg, lat: o.lat, minSep: o.minSep, sigma: o.sigma, flat: o.flat || 0, amt: 0 }));
   const totalExcl = (theta, excludeIdx) => {
     let v = baseFn(theta);
-    for (const t of fixedTerms) v += t.amt * _gaussArc(theta, t.thetaDeg, t.sigma);
+    for (const t of fixedTerms) v += t.amt * _bump(theta, t.thetaDeg, t.sigma, t.flat);
     for (let j = 0; j < terms.length; j++) {
       if (j === excludeIdx) continue;
       const t = terms[j];
-      if (t.amt) v += t.amt * _gaussArc(theta, t.thetaDeg, t.sigma);
+      if (t.amt) v += t.amt * _bump(theta, t.thetaDeg, t.sigma, t.flat);
     }
     return v;
   };
@@ -127,24 +226,42 @@ function _buildRepulsion(baseFn, obstacles, passes = 40) {
   // (0.5) trades convergence speed for stability against neighbours that are
   // close enough to interact but not close enough to need full clustering.
   const RELAX = 0.5;
+  // How much this bump has to add so the ribbon clears obstacle `t`, choosing
+  // the side of it that actually lies inside the legal window.
+  function wanted(t, i) {
+    const theta = t.thetaDeg * DEG;
+    const cur = totalExcl(theta, i);
+    const diff = cur - t.lat;
+    const natural = diff >= 0 ? 1 : -1;
+    let sign = natural;
+    if (boundsFn) {
+      const b = boundsFn(theta);
+      const near = t.lat + sign * t.minSep;
+      if (near > b[1] || near < b[0]) {
+        const far = t.lat - sign * t.minSep;
+        if (far >= b[0] && far <= b[1]) sign = -sign;      // go around the other way
+      }
+    }
+    // Worst case across the plateau, for the same reason the cluster solve
+    // does it: the bump is flat, the ground under it is not.
+    let worst = cur;
+    const step = Math.max(2, (t.flat || 0) / 6);
+    for (let s = -(t.flat || 0); s <= (t.flat || 0); s += step) {
+      const v = totalExcl(theta + s / RF, i);
+      if (sign > 0 ? v < worst : v > worst) worst = v;
+    }
+    if (sign === natural && Math.abs(worst - t.lat) >= t.minSep
+        && (sign > 0 ? worst > t.lat : worst < t.lat)) return 0;    // already clear
+    return (t.lat + sign * t.minSep) - worst;
+  }
   for (let p = 0; p < passes; p++) {
     for (let i = 0; i < terms.length; i++) {
       const t = terms[i];
-      const theta = t.thetaDeg * DEG;
-      const diff = totalExcl(theta, i) - t.lat;
-      const sign = diff >= 0 ? 1 : -1;
-      const target = sign * Math.max(0, t.minSep - Math.abs(diff));
-      t.amt = t.amt + RELAX * (target - t.amt);
+      t.amt = t.amt + RELAX * (wanted(t, i) - t.amt);
     }
   }
-  for (let i = 0; i < terms.length; i++) {
-    const t = terms[i];
-    const theta = t.thetaDeg * DEG;
-    const diff = totalExcl(theta, i) - t.lat;
-    const sign = diff >= 0 ? 1 : -1;
-    t.amt = sign * Math.max(0, t.minSep - Math.abs(diff));
-  }
-  return fixedTerms.concat(terms.map(t => ({ thetaDeg: t.thetaDeg, sigma: t.sigma, amt: t.amt })));
+  for (let i = 0; i < terms.length; i++) terms[i].amt = wanted(terms[i], i);
+  return fixedTerms.concat(terms.map(t => ({ thetaDeg: t.thetaDeg, sigma: t.sigma, flat: t.flat, amt: t.amt })));
 }
 // Repulsion terms are evaluated in the hottest function in the game (terrainH →
 // riverLat runs millions of times at build and ~200×/frame after), and a naive
@@ -157,7 +274,7 @@ function _indexRepulsion(terms) {
   const buckets = Array.from({ length: _REP_BUCKETS }, () => []);
   for (const t of terms) {
     if (!t.amt) continue;
-    const s = t.thetaDeg * DEG * RF, reach = 4 * t.sigma;
+    const s = t.thetaDeg * DEG * RF, reach = (t.flat || 0) + 4 * t.sigma;
     const b0 = ((Math.floor((s - reach) / _repBucketArc) % _REP_BUCKETS) + _REP_BUCKETS) % _REP_BUCKETS;
     const b1 = ((Math.floor((s + reach) / _repBucketArc) % _REP_BUCKETS) + _REP_BUCKETS) % _REP_BUCKETS;
     let b = b0;
@@ -172,7 +289,7 @@ function _applyRepulsion(theta, buckets) {
   let sum = 0;
   for (let i = 0; i < bucket.length; i++) {
     const t = bucket[i];
-    sum += t.amt * _gaussArc(theta, t.thetaDeg, t.sigma);
+    sum += t.amt * _bump(theta, t.thetaDeg, t.sigma, t.flat);
   }
   return sum;
 }
@@ -200,14 +317,31 @@ function sideProfile(lat) {
 // Everything here is 2π-periodic by construction (integer harmonics only), and
 // the whole term is exactly zero inside |lat| < MTN_LAT0 — the valley cannot
 // feel the mountains at all, so none of its tuned curves move.
-const CASCADE_DEG = 212;         // where the waterfall comes off the +lat rim
+// ── Where the waterfall comes off the +lat rim ──────────────────────────────
+// Drawn per world, but not from anywhere: it has to stay clear of the station
+// platforms (its outflow crosses the whole valley), clear of the spoke collars,
+// and off the Reservoir lake, where the outflow would have nothing to run down.
+const _degSep = (a, b) => Math.abs((((a - b) % 360) + 540) % 360 - 180);
+const CASCADE_DEG = (function () {
+  const clear = (d) => {
+    for (const st of [13, 70, 183, 266, 334]) if (_degSep(d, st) < 20) return false;
+    for (const sp of [0, 60, 120, 180, 240, 300]) if (_degSep(d, sp) < 12) return false;
+    return true;
+  };
+  for (let tries = 0; tries < 600; tries++) {
+    const d = _shapeRng() * 360;
+    if (clear(d)) return d;
+  }
+  return 212;
+})();
 
 // ── Periodic ridged value-noise ─────────────────────────────────────────────
 // Harmonics alone give a mountain ONE shape repeated round the ring; peaks need
 // noise. This lattice wraps at `cells` in the arc direction, so it is exactly
 // 2π-periodic (no seam at θ = 0) while still being aperiodic to the eye.
+const _MTN_SEED = Math.imul(WORLD_SEED ^ 0x3c6ef35f, 2654435761) | 0;
 function _mtnHash(ix, iy) {
-  let h = Math.imul(ix | 0, 374761393) ^ Math.imul(iy | 0, 668265263);
+  let h = Math.imul(ix | 0, 374761393) ^ Math.imul(iy | 0, 668265263) ^ _MTN_SEED;
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
@@ -245,47 +379,50 @@ function _mtnFbm(theta, lat, side) {
 // it advance and retreat by ±8 m turns the same wall into headlands and bays
 // with the fields running up into them. Clamped clear of VALLEY_LAT so a
 // wandering road can never end up inside the mountain.
+// One series per side, so the two rims are never mirrors of each other.
+const _FOOT_H = [0, 1].map(() => _normHarm(_harm([[4.6, 1], [3.4, 2], [2.2, 3], [1.4, 6]]), 8.5));
 function _mtnFoot(theta, side) {
-  const p = side > 0 ? 0 : 1.9;
-  const f = MTN_LAT0 + 5.0
-    + 4.6 * Math.sin(theta + 0.31 + p)
-    + 3.4 * Math.sin(2 * theta + 2.74 + p)
-    + 2.2 * Math.sin(3 * theta + 5.52 + p)
-    + 1.4 * Math.sin(6 * theta + 1.13 + p);
+  const f = MTN_LAT0 + 5.0 + _evalHarm(_FOOT_H[side > 0 ? 0 : 1], theta);
   return f < MTN_LAT0 - 2 ? MTN_LAT0 - 2 : f;
 }
-// Crest height, per side (different phases so the two rims are not mirrors).
+// Crest height, per side.
+const _AMP_H = [0, 1].map(() => _normHarm(_harm([[12, 1], [8.5, 2], [5.4, 3], [3.6, 5]]), 24));
 function _mtnAmp(theta, side) {
-  const p = side > 0 ? 0 : 2.13;
-  const a = 33
-    + 12.0 * Math.sin(theta + 0.72 + p)
-    +  8.5 * Math.sin(2 * theta + 2.31 + p)
-    +  5.4 * Math.sin(3 * theta + 5.14 + p)
-    +  3.6 * Math.sin(5 * theta + 1.20 + p);
+  const a = 33 + _evalHarm(_AMP_H[side > 0 ? 0 : 1], theta);
   return a < 9 ? 9 : a;
 }
 // The two named high ranges. Kept OUT of _mtnAmp because that term is scaled by
 // the fBm, and a col landing on the Cascade would have quietly halved the
 // waterfall. These are mostly added straight, so the massifs are guaranteed.
+const _RANGE2_DEG = (CASCADE_DEG + _jit(110, 250)) % 360;
 function _mtnMassif(theta) {
-  return 34.0 * _gaussArc(theta, CASCADE_DEG, 240)    // the massif the falls come off
-       + 18.0 * _gaussArc(theta, 118, 190);           // the range above the farms
+  return 34.0 * _gaussArc(theta, CASCADE_DEG, 240)      // the massif the falls come off
+       + 18.0 * _gaussArc(theta, _RANGE2_DEG, 190);     // a second high range
 }
 // Relief on the face. Folding a sine through |·| turns a smooth dune into a
 // spine with a sharp crest and V-gullies between the spurs; the lat-modulated
 // terms then break those spurs into buttresses and hanging shelves, so the face
 // has depth from any angle instead of reading as vertical corduroy.
+const _CRAG = [0, 1].map(() => ({
+  ridge: [[11.0, 6], [6.0, 11], [3.2, 19], [1.6, 37]].map(([A, k]) => ({ A, k, p: _shapeRng() * _TAU })),
+  gullyP: _shapeRng() * _TAU,
+  butt: [[6.0, 3, 0.14], [3.2, 9, 0.23], [1.8, 17, 0.35]]
+    .map(([A, k, f]) => ({ A, k, f, p: _shapeRng() * _TAU, q: _shapeRng() * _TAU })),
+}));
 function _mtnCrag(theta, lat, side) {
-  const p = side > 0 ? 0 : 1.37;
-  const r1 = 1 - Math.abs(Math.sin(6 * theta + p));
-  const r2 = 1 - Math.abs(Math.sin(11 * theta + 2.2 + p));
-  const r3 = 1 - Math.abs(Math.sin(19 * theta + 4.4 + p));
-  const r4 = 1 - Math.abs(Math.sin(37 * theta + 0.9 + p));
-  const gully = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(lat * 0.20 + p));
-  return (r1 * 11.0 + r2 * 6.0 + r3 * 3.2 + r4 * 1.6) * gully
-       + 6.0 * Math.sin(3 * theta + 1.10 + p) * Math.cos(lat * 0.14 + 0.60)
-       + 3.2 * Math.sin(9 * theta + 3.70 + p) * Math.sin(lat * 0.23 + 2.10)
-       + 1.8 * Math.sin(17 * theta + 5.20 + p) * Math.cos(lat * 0.35 + 1.30);
+  const C = _CRAG[side > 0 ? 0 : 1];
+  let ridge = 0;
+  for (let i = 0; i < C.ridge.length; i++) {
+    const t = C.ridge[i];
+    ridge += t.A * (1 - Math.abs(Math.sin(t.k * theta + t.p)));
+  }
+  const gully = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(lat * 0.20 + C.gullyP));
+  let butt = 0;
+  for (let i = 0; i < C.butt.length; i++) {
+    const t = C.butt[i];
+    butt += t.A * Math.sin(t.k * theta + t.p) * Math.cos(t.f * lat + t.q);
+  }
+  return ridge * gully + butt;
 }
 function _mountainH(theta, lat) {
   const a = lat < 0 ? -lat : lat;
@@ -311,43 +448,46 @@ function _mountainH(theta, lat) {
 // Low-k (1,2,3,5) gives the valley-wide S-sweep; k=8/10/12/14 is MID-frequency
 // content whose period (≈75–115 m) is short enough to read as a visible bend
 // inside any ~300 m street-level sightline.
-function _riverHarm(theta) {
-  return 6.2 * Math.sin(theta + 3.503)
-       + 4.4 * Math.sin(2 * theta + 3.935)
-       + 2.6 * Math.sin(3 * theta + 4.240)
-       + 1.2 * Math.sin(5 * theta + 1.940)
-       + 1.6 * Math.sin(8 * theta + 6.110)
-       + 1.3 * Math.sin(10 * theta + 3.686)
-       + 1.0 * Math.sin(12 * theta + 4.449)
-       + 0.8 * Math.sin(14 * theta + 2.678);   // Σ|A| = 19.1, measured peaks ≈ ±13
-}
-function _halfUnit(theta) { return 0.60 * Math.sin(2 * theta + 0.40) + 0.40 * Math.sin(3 * theta + 2.60); }
+const _RIVER_H = _normHarm(_harm([
+  [6.2, 1], [4.4, 2], [2.6, 3], [1.2, 5],       // valley-wide S-sweep
+  [1.6, 8], [1.3, 10], [1.0, 12], [0.8, 14],    // bends inside a street sightline
+]), 13);
+function _riverHarm(theta) { return _evalHarm(_RIVER_H, theta); }
+
+const _HALF_H = _normHarm(_harm([[0.60, 2], [0.40, 3]]), 1.0);
+function _halfUnit(theta) { return _evalHarm(_HALF_H, theta); }
 // Channel half-width: a modest stream most of the way round, opening into the
 // Reservoir Flats lake (~240°), Solace Park's pond (~73°), the Orchards
 // mill-pond (~160°) and the Dock Annex marina inlet (~305°).
 // The lake is deliberately centred at 233° rather than mid-district: the spoke
 // shaft at 240° has to stay dry, and a bulge sitting on top of it would force
 // the whole reservoir out to one side of the valley to clear it.
+// The widenings drift within their own districts from seed to seed, so the lake
+// is always in Reservoir Flats and the mill-pond always in the Orchards, but
+// which bend they sit on changes. Kept modest around the reservoir: the spoke
+// shaft at 240° has to stay dry, and a bulge on top of it would force the whole
+// lake out to one side of the valley to clear it.
+const WIDENINGS = [
+  { deg: _jit(226, 240), amp: _jit(9.5, 12.5), sigma: _jit(34, 46) },   // Reservoir Flats lake
+  { deg: _jit(66, 82),   amp: _jit(3.8, 5.4),  sigma: _jit(26, 34) },   // Solace Park pond
+  { deg: _jit(152, 170), amp: _jit(2.6, 3.8),  sigma: _jit(18, 26) },   // Orchards mill-pond
+  { deg: _jit(296, 314), amp: _jit(2.2, 3.4),  sigma: _jit(16, 24) },   // Dock Annex marina inlet
+];
 function _riverHalfCore(theta) {
-  return 5.6 + 2.2 * _halfUnit(theta)
-       + 11.0 * _gaussArc(theta, 233, 40)
-       + 4.5  * _gaussArc(theta, 73, 30)
-       + 3.2  * _gaussArc(theta, 160, 22)
-       + 2.8  * _gaussArc(theta, 305, 20);
+  let w = 5.6 + 2.2 * _halfUnit(theta);
+  for (let i = 0; i < WIDENINGS.length; i++) {
+    const g = WIDENINGS[i];
+    w += g.amp * _gaussArc(theta, g.deg, g.sigma);
+  }
+  return w;
 }
 
 // ── Bank gaps: water's edge → road centerline, water's edge → guideway ──────
 // Independent phases so the two banks breathe out of step with each other.
-function _roadGapBase(theta) {
-  return 13.5 + 6.0 * (0.55 * Math.sin(theta + 1.10)
-                     + 0.28 * Math.sin(3 * theta + 4.72)
-                     + 0.17 * Math.sin(7 * theta + 2.21));
-}
-function _railGapBase(theta) {
-  return 15.0 + 6.5 * (0.50 * Math.sin(2 * theta + 5.24)
-                     + 0.30 * Math.sin(theta + 0.41)
-                     + 0.20 * Math.sin(5 * theta + 3.11));
-}
+const _ROADGAP_H = _normHarm(_harm([[0.55, 1], [0.28, 3], [0.17, 7]]), 1.0);
+const _RAILGAP_H = _normHarm(_harm([[0.50, 2], [0.30, 1], [0.20, 5]]), 1.0);
+function _roadGapBase(theta) { return 13.5 + 6.0 * _evalHarm(_ROADGAP_H, theta); }
+function _railGapBase(theta) { return 15.0 + 6.5 * _evalHarm(_RAILGAP_H, theta); }
 const ROAD_GAP_MIN = 9.0;    // water's edge → road centerline
 const RAIL_GAP_MIN = 11.0;   // water's edge → guideway centerline
 
@@ -432,10 +572,12 @@ const PLAZA_R = 44;            // spawn/plaza disc radius that must stay dry
 const RIVER_AVOID = FLAT_SPOTS.map(f => ({
   thetaDeg: f.theta / DEG, lat: f.lat,
   minSep: _riverHalfCore(f.theta) + 7.0,
+  flat: f.r + f.feather * 0.5,          // hold the clearance across the whole pad
   sigma: Math.max(22, f.r + f.feather + 10),
 })).concat([{
   thetaDeg: PLAZA_THETA / DEG, lat: 0,
   minSep: _riverHalfCore(PLAZA_THETA) + 7.0,
+  flat: PLAZA_R,
   sigma: PLAZA_R + 14,
 }]);
 const _riverAvoidBuckets = _indexRepulsion(_buildRepulsion(_riverHarm, RIVER_AVOID));
@@ -466,32 +608,46 @@ function riverLat(theta) { return _prime(theta).riverLat; }
 // Avoidance keeps the road off the spoke shafts and clear of the named
 // set-piece footprints; the hard clamp afterwards guarantees it can never be
 // pushed into the water or off the habitable floor, whatever avoidance asks.
+// `flat` is the obstacle's own half-extent ALONG the arc: the road is held its
+// full minSep away across that whole span, and only then allowed to ease back.
+// minSep is the lat half-extent + ROAD_HALF + ROAD_SHLDR + 1 m.
 const ROAD_AVOID = [
-  ...[0, 60, 120, 180, 240, 300].map(d => ({ thetaDeg: d, lat: 0, minSep: 13, sigma: 15 })),
-  { thetaDeg: 48,  lat: -18, minSep: 8.0,  sigma: 16 },  // coolant valve panel
-  { thetaDeg: 104, lat: -9,  minSep: 8.1,  sigma: 12 },  // power relay cabinet
-  { thetaDeg: 250, lat: -28, minSep: 11.4, sigma: 18 },  // water tower
-  { thetaDeg: 272, lat: -30, minSep: 15.6, sigma: 22 },  // observatory
-  { thetaDeg: 8.2, lat: -34, minSep: 14.6, sigma: 26 },  // civic hall
-  { thetaDeg: 321, lat: -30, minSep: 14.5, sigma: 18 },  // dock warehouse 0
-  { thetaDeg: 337, lat: -30, minSep: 14.5, sigma: 18 },  // dock warehouse 2
+  ...[0, 60, 120, 180, 240, 300].map(d => ({ thetaDeg: d, lat: 0, minSep: 13, flat: 14, sigma: 15 })),
+  // The plaza deck. Missing until a seed swung the river to +20 m here, which
+  // dragged the road (which is always riverLat − riverHalf − gap) straight up
+  // to lat 0 and ran the carriageway through the fountain.
+  { thetaDeg: 6,   lat: 0,   minSep: 29,   flat: 34, sigma: 30 },  // Meridian Plaza deck
+  { thetaDeg: 48,  lat: -18, minSep: 8.0,  flat: 16, sigma: 16 },  // coolant valve panel
+  { thetaDeg: 104, lat: -9,  minSep: 8.1,  flat: 10, sigma: 12 },  // power relay cabinet
+  { thetaDeg: 250, lat: -28, minSep: 11.4, flat: 14, sigma: 18 },  // water tower
+  { thetaDeg: 272, lat: -30, minSep: 15.6, flat: 18, sigma: 22 },  // observatory
+  { thetaDeg: 8.2, lat: -34, minSep: 14.6, flat: 18, sigma: 26 },  // civic hall
+  { thetaDeg: 321, lat: -30, minSep: 14.5, flat: 18, sigma: 18 },  // dock warehouse 0
+  { thetaDeg: 337, lat: -30, minSep: 14.5, flat: 18, sigma: 18 },  // dock warehouse 2
   // The road's lat is no longer anywhere near where it used to be, so every
   // fixed −lat set-piece has to be declared here or the carriageway drives
   // straight through it. These are the ones a ring sweep found it hitting.
-  // minSep = the obstacle's own lat half-extent + ROAD_HALF + ROAD_SHLDR + 1 m
-  { thetaDeg: 44,  lat: -36, minSep: 10.0, sigma: 18 },  // coolant tank 0
-  { thetaDeg: 47,  lat: -36, minSep: 10.0, sigma: 18 },  // coolant tank 1
-  { thetaDeg: 50,  lat: -36, minSep: 10.0, sigma: 18 },  // coolant tank 2
-  { thetaDeg: 95,  lat: -40, minSep: 11.0, sigma: 20 },  // greenhouse 0
-  { thetaDeg: 113, lat: -40, minSep: 11.0, sigma: 20 },  // greenhouse 2
-  { thetaDeg: 113.4, lat: -35.4, minSep: 7.0, sigma: 14 }, // greenhouse fuse cell
+  { thetaDeg: 44,  lat: -36, minSep: 10.0, flat: 12, sigma: 18 },  // coolant tank 0
+  { thetaDeg: 47,  lat: -36, minSep: 10.0, flat: 12, sigma: 18 },  // coolant tank 1
+  { thetaDeg: 50,  lat: -36, minSep: 10.0, flat: 12, sigma: 18 },  // coolant tank 2
+  { thetaDeg: 95,  lat: -40, minSep: 11.0, flat: 14, sigma: 20 },  // greenhouse 0
+  { thetaDeg: 113, lat: -40, minSep: 11.0, flat: 14, sigma: 20 },  // greenhouse 2
+  { thetaDeg: 113.4, lat: -35.4, minSep: 7.0, flat: 9, sigma: 14 }, // greenhouse fuse cell
 ];
 function _roadBase(theta) {
   const L = _prime(theta);
   return L.riverLat - L.riverHalf - Math.max(ROAD_GAP_MIN, _roadGapBase(theta));
 }
-const _roadAvoidBuckets = _indexRepulsion(_buildRepulsion(_roadBase, ROAD_AVOID));
 const ROAD_LAT_MIN = -VALLEY_LAT;              // stay out of the mountain rim
+// The window the road is allowed to occupy, which is exactly what the clamp in
+// _roadLatCore enforces afterwards. Handing it to the solver is what lets an
+// obstacle on the −lat side be cleared by going further −lat when there is no
+// room to go +lat.
+function _roadBounds(theta) {
+  const L = _prime(theta);
+  return [ROAD_LAT_MIN, Math.min(12, L.riverLat - L.riverHalf - (ROAD_HALF + ROAD_SHLDR + 3.0))];
+}
+const _roadAvoidBuckets = _indexRepulsion(_buildRepulsion(_roadBase, ROAD_AVOID, 40, _roadBounds));
 // `wet` is the hard guarantee: whatever the avoidance solve asks for, the road
 // never gets closer to the water than its own shoulder plus 3 m of bank.
 function _roadLatCore(theta, rLat, rHalf) {
@@ -515,20 +671,24 @@ function riverSep(theta) { return roadLat(theta) - riverLat(theta); }
 
 // ── Monorail guideway — always the +lat bank ────────────────────────────────
 const RAIL_AVOID = [
-  ...[0, 60, 120, 180, 240, 300].map(d => ({ thetaDeg: d, lat: 0, minSep: 13, sigma: 15 })),
+  ...[0, 60, 120, 180, 240, 300].map(d => ({ thetaDeg: d, lat: 0, minSep: 13, flat: 14, sigma: 15 })),
   // minSep = the obstacle's own lat half-extent + the guideway half-width + a
   // 2 m margin. The deck rides ~7 m up, so only a genuine lateral overlap
   // matters — being generous here just shoves the guideway into the hillside.
-  { thetaDeg: 122,   lat: 34, minSep: 11.0, sigma: 20 },  // barn
-  { thetaDeg: 124.5, lat: 40, minSep: 9.0,  sigma: 16 },  // silo
-  { thetaDeg: 329,   lat: 30, minSep: 11.0, sigma: 24 },  // dock warehouse 1
-  { thetaDeg: 345,   lat: 30, minSep: 11.0, sigma: 24 },  // dock warehouse 3
+  { thetaDeg: 122,   lat: 34, minSep: 11.0, flat: 14, sigma: 20 },  // barn
+  { thetaDeg: 124.5, lat: 40, minSep: 9.0,  flat: 10, sigma: 16 },  // silo
+  { thetaDeg: 329,   lat: 30, minSep: 11.0, flat: 18, sigma: 24 },  // dock warehouse 1
+  { thetaDeg: 345,   lat: 30, minSep: 11.0, flat: 18, sigma: 24 },  // dock warehouse 3
 ];
 function _railBase(theta) {
   const L = _prime(theta);
   return L.riverLat + L.riverHalf + Math.max(RAIL_GAP_MIN, _railGapBase(theta));
 }
-const _railAvoidBuckets = _indexRepulsion(_buildRepulsion(_railBase, RAIL_AVOID));
+function _railBounds(theta) {
+  const L = _prime(theta);
+  return [L.riverLat + L.riverHalf + 8.0, VALLEY_LAT];
+}
+const _railAvoidBuckets = _indexRepulsion(_buildRepulsion(_railBase, RAIL_AVOID, 40, _railBounds));
 function railLat(theta) {
   let lat = _railBase(theta) + _applyRepulsion(theta, _railAvoidBuckets);
   for (let i = 0; i < STATIONS.length; i++) {
@@ -566,7 +726,11 @@ function railH(theta) {
 // (arc-length, lat) space; the carve is masked out inside the road corridor so
 // the roadway itself stays intact and the stream reads as running under it.
 const TRIBS = (function () {
-  const degs = [26, 57, 91, 135, 166, 205, 232, 289, 314];
+  // Nine of them, spread round the ring but not evenly: each is jittered inside
+  // its own 40° slot, so the spacing is different every world without any two
+  // ever landing on top of each other.
+  const degs = [26, 57, 91, 135, 166, 205, 232, 289, 314]
+    .map(d => (d + (_layRng() - 0.5) * 22 + 360) % 360);
   return degs.map((deg) => {
     const theta = deg * DEG;
     const latLo = riverLat(theta) - riverHalf(theta) - 1.0;      // mouth, at the water
@@ -663,7 +827,7 @@ const CROSSINGS = TRIBS.map(t => {
 // The only places the two banks connect. Chosen away from the stations, the
 // spokes and the widest water; world.js builds a walkable arched span at each.
 const RIVER_BRIDGES = [18, 52, 88, 148, 196, 228, 282, 318]
-  .map(deg => deg * DEG)
+  .map(deg => (deg + (_layRng() - 0.5) * 18) * DEG)
   .filter(theta => riverHalf(theta) < 12)
   .map(theta => {
     const rl = riverLat(theta), rh = riverHalf(theta);
@@ -679,10 +843,12 @@ const RIVER_BRIDGES = [18, 52, 88, 148, 196, 228, 282, 318]
 // Two wooded islands in Reservoir Flats and one in the Orchards mill-pond. The
 // terrain bump lifts them clear of WATER_H; the opaque ground then occludes the
 // transparent water behind it, so no water is drawn over the island.
+// They hang off WIDENINGS rather than off fixed angles, so wherever the lake
+// and the mill-pond ended up this world, the islands are in them.
 const ISLANDS = [
-  { thetaDeg: 230, dLat: -6.0, r: 11, h: 3.1 },
-  { thetaDeg: 238, dLat: 6.5,  r: 9,  h: 2.6 },
-  { thetaDeg: 160, dLat: 3.5,  r: 6,  h: 2.0 },
+  { thetaDeg: WIDENINGS[0].deg - 5, dLat: -6.0, r: 11, h: 3.1 },
+  { thetaDeg: WIDENINGS[0].deg + 4, dLat: 6.5,  r: 9,  h: 2.6 },
+  { thetaDeg: WIDENINGS[2].deg,     dLat: 3.5,  r: 6,  h: 2.0 },
 ].map(i => {
   const theta = i.thetaDeg * DEG;
   return { theta, s: theta * RF, lat: riverLat(theta) + i.dLat, r: i.r, h: i.h };
@@ -770,18 +936,41 @@ function _knollBump(theta, lat) {
 }
 
 // ── Terrain ─────────────────────────────────────────────────────────────────
+// Σ|A| = 5.42. Each octave is a product of an arc harmonic and a lat wave, so
+// the rolling ground changes as you walk across the valley as well as along it.
+const _HILL_T = [
+  [1.55, 2, 0.030], [1.20, 3, 0.055], [0.90, 5, 0.070], [0.66, 7, 0.050],
+  [0.48, 11, 0.160], [0.30, 17, 0.210], [0.20, 23, 0.310], [0.13, 31, 0.430],
+].map(([A, k, f]) => ({ A, k, f, p: _shapeRng() * _TAU, q: _shapeRng() * _TAU }));
 function _hills(theta, lat) {
-  return 1.55 * Math.sin(2 * theta + 4.10) * Math.cos(0.030 * lat + 0.70)
-       + 1.20 * Math.sin(3 * theta + 0.60) * Math.sin(0.055 * lat + 0.40)
-       + 0.90 * Math.sin(5 * theta + 2.30) * Math.cos(0.070 * lat + 1.10)
-       + 0.66 * Math.cos(7 * theta + 0.90) * Math.sin(0.050 * lat)
-       + 0.48 * Math.sin(11 * theta + 3.30) * Math.sin(0.160 * lat + 2.20)
-       + 0.30 * Math.sin(17 * theta + 1.15) * Math.cos(0.210 * lat + 0.30)
-       + 0.20 * Math.sin(23 * theta + 5.05) * Math.cos(0.310 * lat + 1.80)
-       + 0.13 * Math.sin(31 * theta + 2.40) * Math.sin(0.430 * lat + 0.95);  // Σ|A| = 5.42
+  let s = 0;
+  for (let i = 0; i < _HILL_T.length; i++) {
+    const t = _HILL_T[i];
+    s += t.A * Math.sin(t.k * theta + t.p) * Math.cos(t.f * lat + t.q);
+  }
+  return s;
 }
 
 const FLOODPLAIN = 1.65;   // general land level above the h = 0 datum
+
+// Softly floor the floodplain at the waterline. `_hills` can dig 5 m below the
+// datum, and with a fresh set of phases every world some stretch of bank
+// eventually lands under WATER_H. That is not a pond: the drawn water sheet
+// stops at the channel edge, so it is INVISIBLE water — ground you wade
+// through, that slows you down, that nothing will grow on, with nothing to see.
+// A smooth max keeps the ground continuous instead of stamping a flat pan at
+// the waterline where it bites.
+// Windowed so it is EXACTLY the identity more than 3 m above the waterline —
+// an unwindowed smooth max carries a few millimetres of offset all the way out
+// to the rim, and the rim is where the terrain has to meet the hull to the
+// micron or you get a hairline of starfield along the glazing.
+const BANK_FLOOR = WATER_H + 0.45;
+function _softFloor(d) {
+  if (d > 3.0) return d;
+  const soft = 0.5 * (d + Math.sqrt(d * d + 0.55));
+  const w = 1 - _smooth(0.8, 3.0, d);
+  return d + (soft - d) * w;
+}
 
 // The landscape BEFORE the road bench and the flat spots: hillsides, rolling
 // hills, the river channel, tributary gullies and the islands.
@@ -800,6 +989,7 @@ function _rawTerrain(theta, lat) {
   soil -= 0.9 * (1 - _smooth(rh + 3, rh + 40, u));            // land tips gently toward the water
   soil += _tribCarve(theta, lat) * (1 - _roadCorridor(theta, lat));
   h += soil * edgeFade;
+  h = BANK_FLOOR + _softFloor(h - BANK_FLOOR);
 
   // River channel. The bowl reaches WATER_H exactly at u = riverHalf and the
   // land only starts blending in beyond that, so the drawn shoreline and the
@@ -1237,17 +1427,24 @@ const LAYOUT_CHECK = (function () {
   }
   // set-piece clearance: the hard "never in the water" clamp on roadLat can in
   // principle override an avoidance push, so check the result, don't assume it
+  // Checked across each obstacle's FOOTPRINT, not at its centre-line. The
+  // centre-line test passed happily while the road cut the corner off the
+  // observatory 30 m further round the ring.
   const encroach = [];
-  for (const o of ROAD_AVOID) {
-    const theta = o.thetaDeg * DEG;
-    const got = Math.abs(roadLat(theta) - o.lat);
-    if (got < o.minSep - 0.5) encroach.push(`road@${o.thetaDeg}° ${got.toFixed(1)}/${o.minSep}`);
-  }
-  for (const o of RAIL_AVOID) {
-    const theta = o.thetaDeg * DEG;
-    const got = Math.abs(railLat(theta) - o.lat);
-    if (got < o.minSep - 0.5) encroach.push(`rail@${o.thetaDeg}° ${got.toFixed(1)}/${o.minSep}`);
-  }
+  const sweep = (o, latFn, tag) => {
+    const reach = (o.flat || 0) + 2;
+    let worst = Infinity, worstDeg = 0;
+    for (let s = -reach; s <= reach; s += 1.5) {
+      const theta = o.thetaDeg * DEG + s / RF;
+      const got = Math.abs(latFn(theta) - o.lat);
+      if (got < worst) { worst = got; worstDeg = o.thetaDeg + (s / RF) / DEG; }
+    }
+    if (worst < o.minSep - 0.5) {
+      encroach.push(`${tag}@${worstDeg.toFixed(1)}° ${worst.toFixed(1)}/${o.minSep}`);
+    }
+  };
+  for (const o of ROAD_AVOID) sweep(o, roadLat, 'road');
+  for (const o of RAIL_AVOID) sweep(o, railLat, 'rail');
   const r = {
     roadToWater: worstRoad, roadToWaterDeg: worstRoadDeg,
     waterToRail: worstRail, waterToRailDeg: worstRailDeg,

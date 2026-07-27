@@ -455,7 +455,14 @@ function buildNPCs(scene, rng) {
       if (vUp < 0) {
         a.vel.addScaledVector(_nUp, -vUp * 1.3);      // restitution 0.3
         a.vel.multiplyScalar(0.9);
-        if (Math.abs(vUp) < 0.5 && _rising && gScale > 0.4) {   // settled while spin returns → land
+        // Settled, gravity back, lift finished, and the ring is recovering
+        // rather than stalling → land. `_rising` alone is only true WHILE the
+        // spin is climbing; bodies drifting tens of metres up are still falling
+        // long after spin-up completes, so on its own it could never be met
+        // again and the whole population bounced forever. Dropping it entirely
+        // is worse — half the crowd re-lands in the same frame it was kicked,
+        // because spin-down passes through these same values on the way down.
+        if (Math.abs(vUp) < 0.9 && gScale > 0.45 && _lift < 0.2 && (_rising || gScale >= 0.995)) {
           land(a, _nT.theta, gp, player);
           return;
         }

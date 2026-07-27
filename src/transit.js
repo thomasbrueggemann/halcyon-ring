@@ -7,11 +7,12 @@
 
 const RAIL_HALF = 1.45;          // deck half-width (m, lateral)
 const RAIL_GAUGE = 0.7;          // twin-lane offset from centerline
-const TRAIN_SPEED = 16;          // m/s cruise
+const TRAIN_SPEED = 21;          // m/s cruise
 const TRAIN_ACCEL = 5.5;         // m/s² accelerate off a stop
 const TRAIN_BRAKE = 4.0;         // m/s² braking
-const BRAKE_DIST = 60;           // start braking this far out (m)
-const DWELL_TIME = 9;            // seconds stopped at a platform
+const BRAKE_DIST = 90;           // start braking this far out (m)
+const DWELL_TIME = 7;            // seconds stopped at a platform
+const TRAINS_PER_DIR = 3;        // 6 sets total → a train through each platform ≈ every 50 s
 const CAR_LEN = 6.8, CAR_GAP = 1.0;
 const PLAT_RISE = 6.0 - 0.25;    // platform deck height above the pad (car floor ≈ platform)
 const PLAT_HALFLEN = 12;         // 24 m long
@@ -286,8 +287,11 @@ function buildTransit(scene, colliders, rng) {
     ctx.fillText(st.name.toUpperCase(), 256, 64);
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
+    // Single-sided on purpose. It faces the track, for people arriving; from
+    // the platform you'd only ever see it mirrored, and it sat right in front
+    // of the departure board. The board carries the station name anyway.
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 1.05),
-      new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+      new THREE.MeshBasicMaterial({ map: tex, side: THREE.FrontSide }));
     sign.applyMatrix4(placementMatrix(st.theta + PLAT_HALFLEN * 0.6 / RF, innerLat - 0.05, PLAT_H + 2.05, Math.PI / 2, 1));
     group.add(sign);
     // sign support posts (spread along theta under the sign)
@@ -297,9 +301,31 @@ function buildTransit(scene, colliders, rng) {
       group.add(sp);
     }
 
+    // ── live departure board ──
+    // One canvas, two meshes back to back at either end of the platform facing
+    // inward, so it is readable wherever you are standing and from the ramp on
+    // the way up. Redrawn (only when you are near enough to read it) in update().
+    const bcv = document.createElement('canvas');
+    bcv.width = 640; bcv.height = 280;
+    const btex = new THREE.CanvasTexture(bcv);
+    btex.colorSpace = THREE.SRGBColorSpace;
+    const bmat = new THREE.MeshBasicMaterial({ map: btex, toneMapped: false });
+    const bgeo = new THREE.PlaneGeometry(3.4, 1.49);
+    // yaw 0 faces −theta, yaw π faces +theta — each board looks back along the
+    // platform toward the middle of it
+    for (const [ds, yaw] of [[-PLAT_HALFLEN * 0.92, Math.PI], [PLAT_HALFLEN * 0.92, 0]]) {
+      const b = new THREE.Mesh(bgeo, bmat);
+      b.applyMatrix4(placementMatrix(st.theta + ds / RF, centerLat, PLAT_H + 2.35, yaw, 1));
+      group.add(b);
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.6, 6), trimMat);
+      post.applyMatrix4(placementMatrix(st.theta + ds / RF, centerLat, PLAT_H + 0.8, 0, 1));
+      group.add(post);
+    }
+
     stationInfos.push({
       name: st.name, theta: st.theta, thetaDeg: st.thetaDeg,
       platLat: centerLat, platH: PLAT_H, s0, s1,
+      board: { cv: bcv, ctx: bcv.getContext('2d'), tex: btex, drawn: -1 },
     });
   }
   for (const st of STATIONS) buildStation(st);
@@ -343,12 +369,23 @@ function buildTransit(scene, colliders, rng) {
   }
 
   const carR = RF - 6.0;
-  const trains = [
-    { theta: 20 * DEG, dir: 1, lane: -RAIL_GAUGE, v: TRAIN_SPEED, state: 'cruise', dwellT: 0, target: null,
-      cars: [0, 1, 2].map(() => makeCar(0xe8ecf0)) },
-    { theta: 200 * DEG, dir: -1, lane: RAIL_GAUGE, v: TRAIN_SPEED, state: 'cruise', dwellT: 0, target: null,
-      cars: [0, 1, 2].map(() => makeCar(0xe8973c)) },
-  ];
+  // Three sets each way, evenly spaced. With five platforms on the loop that
+  // puts a train through any given one roughly every 50 seconds, which is what
+  // makes the countdown board worth reading — at the old two-set headway you
+  // waited nearly two minutes and simply walked instead.
+  const trains = [];
+  for (let d = 0; d < 2; d++) {
+    const dir = d === 0 ? 1 : -1;
+    for (let i = 0; i < TRAINS_PER_DIR; i++) {
+      trains.push({
+        id: trains.length,
+        theta: ((d * 60) + i * (360 / TRAINS_PER_DIR)) * DEG,
+        dir, lane: dir > 0 ? -RAIL_GAUGE : RAIL_GAUGE,
+        v: TRAIN_SPEED, state: 'cruise', dwellT: 0, target: null,
+        cars: [0, 1, 2].map(() => makeCar(dir > 0 ? 0xe8ecf0 : 0xe8973c)),
+      });
+    }
+  }
 
   // place a car's manual matrix along the winding curve at (theta, laneOffset)
   function placeCar(theta, lane, out) {
@@ -375,6 +412,54 @@ function buildTransit(scene, colliders, rng) {
     if (d < -CIRCUMFERENCE / 2 + 1) d += CIRCUMFERENCE;
     return d;
   }
+  // ── Timetable ─────────────────────────────────────────────────────────────
+  // The countdown on the platform boards is not a decoration with a random
+  // number in it: it is solved from the same speed profile the trains actually
+  // fly, so when it reaches 0:00 a train is standing at the platform.
+  //
+  // Time to cover `d` metres starting at v0 and stopping at the far end, with
+  // the cruise/accelerate/brake limits above. Matches the state machine's
+  // braking law (v = sqrt(2·B·d)) exactly, so the two do not drift apart.
+  function legTime(d, v0) {
+    if (d <= 0.01) return 0;
+    const V = TRAIN_SPEED, A = TRAIN_ACCEL, B = TRAIN_BRAKE;
+    const da = Math.max(0, (V * V - v0 * v0) / (2 * A));   // reach cruise
+    const db = (V * V) / (2 * B);                          // brake from cruise
+    if (da + db <= d) return (V - v0) / A + (d - da - db) / V + V / B;
+    // too short to reach cruise: accelerate to a peak, then brake
+    const vp = Math.sqrt((2 * A * B * d + B * v0 * v0) / (A + B));
+    return Math.max(0, (vp - v0) / A) + vp / B;
+  }
+  // Seconds until `tr` is standing at station `si`, counting every stop it
+  // makes on the way (and the rest of the dwell it is serving right now).
+  function etaTo(tr, si) {
+    let t = 0, v0 = tr.v;
+    if (tr.state === 'dwell') { t = Math.max(0, DWELL_TIME - tr.dwellT); v0 = 0; }
+    const ahead = [];
+    for (const s of stationInfos) {
+      let d = fwdArc(tr, s.theta);
+      if (d < 1) d += CIRCUMFERENCE;      // at it or just past it → next lap
+      ahead.push({ s, d });
+    }
+    ahead.sort((a, b) => a.d - b.d);
+    let prev = 0;
+    for (const x of ahead) {
+      t += legTime(x.d - prev, v0);
+      v0 = 0;
+      if (x.s === si) return t;
+      t += DWELL_TIME;
+      prev = x.d;
+    }
+    return t;
+  }
+  // Is a train standing at this platform right now?
+  function dwellingAt(si) {
+    for (const tr of trains) {
+      if (tr.state === 'dwell' && Math.abs(arcDelta(tr.theta, si.theta)) < 3) return tr;
+    }
+    return null;
+  }
+  // The station a train calls at next (used for "via …" and the on-board sign).
   function nextStation(train) {
     let best = null, bestD = Infinity;
     for (const si of stationInfos) {
@@ -384,21 +469,112 @@ function buildTransit(scene, colliders, rng) {
     }
     return { st: best, dist: bestD };
   }
+  function stationAfter(si, dir) {
+    let best = null, bestD = Infinity;
+    for (const o of stationInfos) {
+      if (o === si) continue;
+      let d = dir * arcDelta(si.theta, o.theta);
+      if (d < 0) d += CIRCUMFERENCE;
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best;
+  }
+  // Soonest arrival in each direction, for the board.
+  function arrivalsAt(si) {
+    const out = [];
+    for (const dir of [1, -1]) {
+      let best = null, bestT = Infinity;
+      for (const tr of trains) {
+        if (tr.dir !== dir) continue;
+        const t = etaTo(tr, si);
+        if (t < bestT) { bestT = t; best = tr; }
+      }
+      if (best) out.push({ dir, eta: bestT, train: best, via: stationAfter(si, dir) });
+    }
+    return out;
+  }
+  function mmss(s) {
+    s = Math.max(0, Math.round(s));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  // ── drawing the board ─────────────────────────────────────────────────────
+  function drawBoard(si) {
+    const b = si.board;
+    const c = b.ctx, W = 640, H = 280;
+    c.fillStyle = '#0b1620'; c.fillRect(0, 0, W, H);
+    c.strokeStyle = '#2b4a5c'; c.lineWidth = 5; c.strokeRect(4, 4, W - 8, H - 8);
+
+    // header: station name + the actual wall clock
+    c.fillStyle = '#0f2634'; c.fillRect(10, 10, W - 20, 54);
+    c.fillStyle = '#7fe4f2'; c.textBaseline = 'middle'; c.textAlign = 'left';
+    c.font = 'bold 32px sans-serif';
+    c.fillText(si.name.toUpperCase(), 26, 38);
+    c.textAlign = 'right';
+    c.fillStyle = '#d9f2fa'; c.font = '28px monospace';
+    c.fillText(new Date().toLocaleTimeString('en-GB'), W - 26, 38);
+
+    const here = dwellingAt(si);
+    const rows = arrivalsAt(si);
+    rows.sort((a, b2) => a.eta - b2.eta);
+
+    let y = 96;
+    for (const r of rows) {
+      const atPlatform = here && here.dir === r.dir;
+      c.textAlign = 'left';
+      c.font = 'bold 34px sans-serif';
+      c.fillStyle = r.dir > 0 ? '#8fd8ff' : '#ffc07a';
+      c.fillText(r.dir > 0 ? '▶' : '◀', 26, y);
+      c.fillStyle = '#e8f4fa'; c.font = '27px sans-serif';
+      c.fillText(`via ${r.via ? r.via.name : '—'}`, 66, y);
+      c.textAlign = 'right';
+      if (atPlatform) {
+        c.fillStyle = '#8dff9a'; c.font = 'bold 30px monospace';
+        c.fillText(`BOARDING ${mmss(Math.max(0, DWELL_TIME - here.dwellT))}`, W - 26, y);
+      } else {
+        c.fillStyle = r.eta < 25 ? '#ffd166' : '#d9f2fa';
+        c.font = 'bold 34px monospace';
+        c.fillText(mmss(r.eta), W - 26, y);
+      }
+      y += 52;
+    }
+
+    c.strokeStyle = '#1e3646'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(20, H - 54); c.lineTo(W - 20, H - 54); c.stroke();
+    c.textAlign = 'center'; c.fillStyle = '#7fa6bb'; c.font = '23px sans-serif';
+    c.fillText(here ? '[E] board — doors closing' : 'HALCYON RING TRANSIT · [E] to board', W / 2, H - 28);
+    b.tex.needsUpdate = true;
+  }
 
   const _seatW = new THREE.Vector3();
   let prompt = null;
 
   const api = {
     group, trains, stationInfos, player: null, prompt: null,
-    seatPos, PLAT_RISE,
+    seatPos, PLAT_RISE, etaTo, arrivalsAt, nextStation, stationAfter, legTime, DWELL_TIME,
   };
 
+  // 9 m, not 5.5: the platform is 24 m long and the train stops at the middle of
+  // it, so a tighter radius meant standing on your own platform watching the
+  // doors open with no way to get on.
   function boardableTrain() {
     if (!api.player) return null;
     for (const tr of trains) {
       if (tr.state !== 'dwell') continue;
       seatPos(tr, _seatW);
-      if (_seatW.distanceTo(api.player.pos) < 5.5) return tr;
+      if (_seatW.distanceTo(api.player.pos) < 9) return tr;
+    }
+    return null;
+  }
+  // The platform the player is standing on, if any.
+  function playerAtStation() {
+    const p = api.player;
+    if (!p || p.ride) return null;
+    for (const si of stationInfos) {
+      if (Math.abs(arcDelta(si.theta, p.theta)) > PLAT_HALFLEN + 8) continue;
+      if (Math.abs(p.lat - si.platLat) > 6) continue;
+      if (p.h < si.platH - 2.5) continue;              // down on the ground, not up top
+      return si;
     }
     return null;
   }
@@ -413,7 +589,8 @@ function buildTransit(scene, colliders, rng) {
         player.ride = null;
         const si = stationInfos.reduce((a, b) =>
           Math.abs(arcDelta(tr.theta, b.theta)) < Math.abs(arcDelta(tr.theta, a.theta)) ? b : a);
-        player.teleport(tr.theta / DEG, si.platLat, si.platH, 0);
+        // step out onto the platform facing the train you just left (−lat)
+        player.teleport(tr.theta / DEG, si.platLat, si.platH, -Math.PI / 2);
       } else {
         // hop off a MOVING train — inherit its velocity and leap clear
         _railFrame(tr.theta);
@@ -447,6 +624,7 @@ function buildTransit(scene, colliders, rng) {
     });
   };
 
+  let boardClock = 0;
   function update(dt) {
     for (const tr of trains) {
       // ── state machine: cruise → brake → dwell → accel ──
@@ -480,14 +658,41 @@ function buildTransit(scene, colliders, rng) {
       });
     }
 
+    // ── departure boards ──
+    // Only the board(s) you could actually read get redrawn, and only a few
+    // times a second: five canvas repaints per frame for signs 2 km away is a
+    // lot of nothing.
+    boardClock += dt;
+    if (boardClock >= 0.25) {
+      boardClock = 0;
+      const p = api.player;
+      for (const si of stationInfos) {
+        const near = p && Math.abs(arcDelta(si.theta, p.theta)) < 130 && Math.abs(p.lat - si.platLat) < 90;
+        if (near) drawBoard(si);
+      }
+    }
+
     // ── boarding / riding prompt ──
     const player = api.player;
     if (player && player.ride) {
-      prompt = player.ride.train.state === 'dwell' ? '[E] Hop off' : '[E] Hop off (moving!)';
+      const tr = player.ride.train;
+      const here = stationInfos.find(si => tr.state === 'dwell' && Math.abs(arcDelta(tr.theta, si.theta)) < 3);
+      if (here) {
+        prompt = `${here.name} — [E] step off`;
+      } else {
+        const { st } = nextStation(tr);
+        prompt = st ? `Next stop ${st.name} · ${mmss(etaTo(tr, st))} — [E] hop off` : '[E] Hop off (moving!)';
+      }
     } else if (boardableTrain()) {
       prompt = '[E] Board train';
     } else {
-      prompt = null;
+      const si = playerAtStation();
+      if (si) {
+        const rows = arrivalsAt(si).sort((a, b) => a.eta - b.eta);
+        prompt = rows.length ? `${si.name} — next train ${mmss(rows[0].eta)} (via ${rows[0].via.name})` : null;
+      } else {
+        prompt = null;
+      }
     }
     api.prompt = prompt;
   }

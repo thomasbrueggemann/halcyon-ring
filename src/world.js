@@ -228,21 +228,26 @@ function makeTerrainMaterial(textures) {
         varying vec3 vCliff;`)
       .replace('#include <map_fragment>', `
         vec3 w = vSplat / max(vSplat.x + vSplat.y + vSplat.z, 1e-4);
-        vec2 uvG = vTerrUv * uSplatScale.x;
         // The terrain UV is the ground PLAN (arc, lat). On a 70° mountain face
         // one metre of lat is three metres of rock, so a plan-mapped texture
         // smears into vertical corduroy. aCliff.xy is the same point mapped as
         // (arc, altitude) instead; blend to it by how steep the face is, and the
-        // stone keeps its grain all the way up.
-        vec2 uvR = mix(vTerrUv, vCliff.xy, vCliff.z) * uSplatScale.y;
+        // stone keeps its grain all the way up. Half the tiling rate up there
+        // too: a 7 m tile that reads fine underfoot repeats visibly across a
+        // 50 m open face.
+        vec2 uvBase = mix(vTerrUv, vCliff.xy * 0.5, vCliff.z);
+        vec2 uvG = vTerrUv * uSplatScale.x;
+        vec2 uvR = uvBase * uSplatScale.y;
         vec2 uvS = vTerrUv * uSplatScale.z;
         vec3 albedo = texture2D(gMap, uvG).rgb * w.x
                     + texture2D(rMap, uvR).rgb * w.y
                     + texture2D(sMap, uvS).rgb * w.z;
         // detail octave at a different, non-harmonic rate breaks up the macro
-        // repeat that any single tiling ground texture shows across 5.9 km
-        float det = texture2D(dMap, vTerrUv * 0.31).r;
-        float det2 = texture2D(dMap, vTerrUv * 0.043).r;
+        // repeat that any single tiling ground texture shows across 5.9 km —
+        // in cliff space as well, or the one thing breaking up the repeat is
+        // itself smeared into stripes exactly where the repeat is worst
+        float det = texture2D(dMap, uvBase * 0.31).r;
+        float det2 = texture2D(dMap, uvBase * 0.043).r;
         albedo *= mix(1.0, det * det2, 0.55);
         diffuseColor.rgb *= albedo;`)
       .replace('#include <roughnessmap_fragment>', `
@@ -382,6 +387,13 @@ function buildWorld(scene, textures, colliders) {
         const outside = e.dry ? 1e9 : Math.max(0, Math.max(e.lo - lat, lat - e.hi));
         let sand = 1 - _sstep(0.0, 4.2 + jit * 1.4, outside);         // bed + beach
         if (onIsland(theta, lat)) sand = Math.max(sand, 0.4);         // island shingle
+        // Snowline. There is no fourth splat layer, so the caps borrow the
+        // sand map — pale and fine-grained — and the vertex colour below
+        // brightens it the rest of the way. Brightening the ROCK map instead
+        // just turned the brown beige: vertex colour multiplies, so it can
+        // lighten a hue but never desaturate one.
+        const snow = _sstep(48, 66, h) * (1 - _sstep(1.5, 2.1, slope)) * _sstep(MTN_LAT0 - 6, MTN_LAT0 + 4, alat);
+        sand = Math.max(sand, snow);
         let rock = _sstep(0.62 + jit * 0.06, 1.05, slope);           // scree on steep faces
         // The rim goes bare above the tree line. Keyed off ALTITUDE, not lat:
         // the mountain foot wanders ±8 m, and a fixed lat band would run across
@@ -412,13 +424,10 @@ function buildWorld(scene, textures, colliders) {
         // damp everything slightly under the trees' preferred belt so the
         // valley sides don't read as uniformly lit cardboard
         const tint = 0.94 + 0.06 * Math.sin(theta * 7.0 + lat * 0.05);
-        // Snowline. Rather than a fourth splat layer, brighten the (already
-        // rock) peaks toward a cold white — vertex colour multiplies straight
-        // into the albedo, so a factor >1 reads as snow lying on the crags.
-        // It only bites where the ground is genuinely high, so the sheltered
-        // gullies stay bare and the caps break up along the ridgeline.
-        const snow = _sstep(44, 64, h) * (1 - _sstep(1.5, 2.1, slope));
-        const r = ao * tint * (1 + snow * 0.95);
+        // Lift the snow caps the rest of the way (the splat above already put
+        // the pale layer there). Only where the ground is genuinely high, so
+        // the sheltered gullies stay bare and the caps break along the ridge.
+        const r = ao * tint * (1 + snow * 0.75);
         colors[k * 3] = r;
         colors[k * 3 + 1] = r * (1 + snow * 0.04);
         colors[k * 3 + 2] = r * (0.99 + snow * 0.12);
@@ -870,7 +879,10 @@ function buildWorld(scene, textures, colliders) {
           float froth  = texture2D(wN2, vec2(vCUv.x * 5.0, vCUv.y * 0.22 - uTime * sp * 0.05)).r;
           vec3 calm = vec3(0.30, 0.56, 0.60);
           vec3 white = vec3(0.93, 0.97, 1.00);
-          float f = clamp(vFlow * 1.5 + froth * vFlow * 1.6 + streak * 0.25, 0.0, 1.0);
+          // Deliberately short of saturating: a curtain that clamps to 1.0
+          // everywhere is a flat white rectangle with no structure in it, and
+          // the structure is the only thing telling you the water is moving.
+          float f = clamp(vFlow * 0.62 + froth * vFlow * 0.85 + streak * 0.30, 0.0, 0.94);
           diffuseColor.rgb *= mix(calm, white, f);
           diffuseColor.a *= mix(0.72, 0.97, f);`)
         .replace('#include <normal_fragment_maps>', `
@@ -884,6 +896,24 @@ function buildWorld(scene, textures, colliders) {
     mat.customProgramCacheKey = () => 'cascade-v1';
     return mat;
   })();
+  // What the DRAWN terrain does at a point — the bilinear interpolation of the
+  // height grid, not the true function. Over a 2.4 m lat step the gorge floor
+  // can drop 14 m, so the mesh cuts a huge chord across the real curve and
+  // stands metres proud of it. A water sheet placed 0.3 m above the TRUE floor
+  // therefore surfaced through the rock in bands all the way down the fall.
+  function meshTerrainH(theta, lat) {
+    const fl = ((lat + FLOOR_LAT) / (2 * FLOOR_LAT)) * (TNP - 1);
+    const i0 = Math.max(0, Math.min(TNP - 2, Math.floor(fl))), tl = fl - i0;
+    const latOf = (i) => -FLOOR_LAT + (2 * FLOOR_LAT) * (i / (TNP - 1));
+    const fs = (theta / (Math.PI * 2)) * TSEG;
+    const s0 = Math.floor(fs), ts = fs - s0;
+    const thOf = (s) => (s / TSEG) * Math.PI * 2;
+    const at = (s, i) => terrainH(thOf(s), latOf(i));
+    const a = at(s0, i0) * (1 - tl) + at(s0, i0 + 1) * tl;
+    const b = at(s0 + 1, i0) * (1 - tl) + at(s0 + 1, i0 + 1) * tl;
+    return a * (1 - ts) + b * ts;
+  }
+
   let mist = null;
   {
     const C = CASCADE;
@@ -896,9 +926,11 @@ function buildWorld(scene, textures, colliders) {
     const fillOf = { tarn: 0.80, fall: 0.72, basin: 0.85, run: 0.68 };
     for (let k = 0; k <= N; k++) {
       const lat = C.latHead + (C.latMouth - C.latHead) * (k / N);
-      const h = C.surfAt(lat);
       const mid = C.theta + C.arcAt(lat) / RF;
       const hw = C.halfAt(lat) * fillOf[C.seg(lat)];
+      // ride above whichever is higher: the modelled water surface, or the
+      // rock the renderer is actually going to draw here
+      const h = Math.max(C.surfAt(lat), meshTerrainH(mid, lat) + 0.28);
       torusPosition(mid, lat, h, v);
       if (k > 0) along += prev.distanceTo(v);
       prev.copy(v);
@@ -907,7 +939,10 @@ function buildWorld(scene, textures, colliders) {
       const grade = Math.abs(C.surfAt(lat + dLat) - h) / Math.abs(dLat);
       const fl = Math.min(1, grade / 3.0);
       for (const sgn of [-1, 1]) {
-        torusPosition(mid + (sgn * hw) / RF, lat, h, v);
+        // The gorge is a V, so its edges sit above its bed: let the sheet climb
+        // the walls a little rather than slicing into them.
+        const eth = mid + (sgn * hw) / RF;
+        torusPosition(eth, lat, Math.max(h, meshTerrainH(eth, lat) + 0.22), v);
         pos.push(v.x, v.y, v.z);
         uv.push(sgn * 0.5 + 0.5, along);
         flow.push(fl);

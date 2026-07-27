@@ -14,6 +14,12 @@ noise with normal and roughness maps derived from the same fields, and the light
 uses a painted equirectangular environment run through PMREM for image-based
 specular. three.js r160 is vendored in `lib/`, so the game runs fully offline.
 
+**Every session generates a different ring.** The river's meander, the road and
+guideway that hang off it, the rolling hills, the mountain rim, where the waterfall
+comes down, the knolls, the lanes, the buildings and the planting are all drawn from
+one world seed. The seed is printed on the title screen and to the console; add
+`?seed=12345` to the URL to replay an exact ring.
+
 ## Run it
 
 Just open `index.html` in a browser — no server, no build step, no npm/node
@@ -37,6 +43,7 @@ that depends on it.
 | Shift | Run |
 | Space | Jump |
 | E | Interact (valves, fuses, terminals, board/leave trains) |
+| — | Platform boards show the live countdown to the next train in each direction |
 | **Zero-g** | WASD = thrusters (toward where you look), Space = climb, C = descend |
 | **In water** | wading slows you; past chest depth you swim, Space to rise |
 | Esc | Pause / release pointer |
@@ -70,11 +77,21 @@ Fix all five and the wheel stabilizes for good.
 - When the wheel spins down, the stars, sun, Earth, and Moon visibly stop
   wheeling past the glass ceiling — the sky group's rotation *is* the spin state
   (`src/sky.js`, `src/gravity.js`).
-- The ground does not stop at the floor chord: past |lat| = 55 m it curves up
-  along the tube wall itself, so the green hillsides *become* the window frames,
-  as in the painting. The terrain's outermost ring of vertices sits exactly on
-  the hull, so there is no seam between land and glass (`src/world.js`,
-  `sideProfile` in `src/layout.js`).
+- The tube is 190 m across, and deliberately not all valley. Inside ±52 m is the
+  settled floor — road, river, guideway, houses, farms. Beyond it the ground
+  climbs into a **rocky mountain rim** that runs the whole ring on both sides:
+  ridged fBm over seeded harmonics, crests 20–90 m, bare rock above the tree
+  line, pale snow on the high crags, erratics and scree fans on the slopes for
+  scale. The far face then comes back down to meet the glazing, and the
+  terrain's outermost ring of vertices sits exactly on the hull, so there is no
+  seam between land and glass (`_mountainH` in `src/layout.js`, `src/world.js`).
+- **The Cascade.** A gorge is cut into the inner face of the +lat rim — a hanging
+  tarn on the crest, a 25–60 m sheer fall off the lip, a plunge basin at the toe,
+  and an outflow stream that meanders down across the fields, under the guideway,
+  into the river. The falling sheet, the pool and the mist are all derived from
+  the same course the rock is carved to, so the water and the ground are the same
+  shape by construction. Its position is drawn per world, clear of the stations
+  and the spokes.
 - **The valley has one shape, and everything hangs off it.** The three long
   ribbons are not three independent curves — they are the river plus two signed
   offsets, so they can never overlap:
@@ -92,7 +109,7 @@ Fix all five and the wheel stabilizes for good.
   separations and logs `[layout] road↔water … water↔rail … road↔rail …` to the
   console.
 - The road is cut and filled to a *smoothed* grade rather than draped on the
-  ground, so it never exceeds ~5% even where it wanders across a rising
+  ground, so it stays well under 15% even where it wanders across a rising
   hillside; the difference between the raw landscape and that grade becomes the
   cuttings and embankments beside it. It is built from a real cross-section —
   cambered carriageway, kerbs, gravel shoulders, painted lane markings.
@@ -110,19 +127,29 @@ Fix all five and the wheel stabilizes for good.
   cottages, and mid-rise downtown cores that follow the road's curve — all
   instanced meshes with per-instance color variation (`src/city.js`,
   `src/vegetation.js`). Every building has procedurally lit windows.
-- A full-circumference elevated monorail runs the far (+lat) bank on pylons,
-  with two trains going opposite directions and five stations — walk up a
-  platform ramp from the hillside side, wait for a train to stop, board with E,
-  ride the ring, and hop off (even mid-journey, inheriting the train's
-  velocity) (`src/transit.js`).
+- A full-circumference elevated monorail runs the far (+lat) bank on pylons:
+  **six trains**, three each way, so a train calls at any given platform roughly
+  every 50 seconds. Each platform carries a live **departure board** showing the
+  wall-clock time and a counting-down ETA for the next train in each direction —
+  solved from the trains' actual speed profile, not faked, so it is accurate to
+  a couple of seconds and reads 0:00 exactly when a train is standing there.
+  Walk up the ramp, board with E while the doors are open, watch the next stop
+  and its ETA on the HUD, and step off at whichever station you like — or hop
+  off mid-journey and inherit the train's velocity (`src/transit.js`).
 - Movement respects the new relief: you step over kerbs and deck lips, slide
   back down slopes steeper than about 32°, wade (slowly) through shallow water
   and swim once it is over chest depth (`src/player.js`).
 - The ring is inhabited: ~120 people stroll the lanes, chat, and idle at the
   plaza and market, with dogs, cats, ducks on the river, and birds overhead
-  (`src/npcs.js`). When gravity fails, everyone tumbles wildly through the
-  air and becomes a soft obstacle that deflects your flight — except the
-  birds, who just keep flying.
+  (`src/npcs.js`).
+- **When the wheel stalls, everything unsecured lifts off the floor together.**
+  People, dogs, cats, ducks, crates, barrels, planters — and the river, which
+  peels off the surface as hundreds of wobbling globules trailing spray
+  (`src/hydro.js`). They rise at a slow, steady drift rather than being launched,
+  tumbling and colliding, filling the volume of the tube for the length of the
+  failure; then the lift lets go slowly as spin returns and the whole population
+  comes down, crumples, and picks itself up. You go up with them. The birds
+  ignore the whole thing.
 - All audio — ambience, klaxon, spin-down groan, footsteps, zero-g wind, chimes —
   is synthesized with WebAudio (`src/audio.js`).
 

@@ -68,6 +68,8 @@ const GAMEPAD_LOOK_SENS = 0.02;      // rad/frame at full stick deflection
 const LIFT_ONSET_G = 0.55;   // gravityScale at which things start to lift
 const LIFT_RISE    = 1.9;    // m/s drift toward the spin axis at full lift
 const LIFT_EASE    = 0.55;   // how quickly drift converges on LIFT_RISE (1/s)
+const LIFT_ATTACK  = 1.4;    // lift comes on fast when the wheel stalls (1/s)
+const LIFT_RELEASE = 0.16;   // and lets go slowly when it catches (1/s)
 
 // Gravity-failure event cadence (seconds)
 const FIRST_FAILURE_AT = 75;
@@ -77,8 +79,23 @@ const FAILURE_INTERVAL_MAX = 165;
 const SPIN_DOWN_TIME = 7;
 const SPIN_UP_TIME   = 10;
 
-// Deterministic world seed
-const WORLD_SEED = 20930417;
+// ── World seed ──────────────────────────────────────────────────────────────
+// Every ring is generated from this one number: the river's meander, the road
+// and guideway that hang off it, the hills, the mountain rim, where the Cascade
+// falls, the knolls, the lanes, the buildings and the planting. Each session
+// gets a fresh one, so no two shifts aboard Halcyon look the same.
+//
+// Pass ?seed=12345 to replay an exact ring — worth knowing when you find one
+// you like, or when something looks wrong and you want it back to look at.
+// ?seed=20930417 is the ring this was built and tuned against.
+const WORLD_SEED = (function () {
+  try {
+    const q = new URLSearchParams(location.search).get('seed');
+    if (q !== null && q !== '' && Number.isFinite(Number(q))) return Number(q) >>> 0;
+  } catch (_) { /* no location (headless / file://) */ }
+  return (Math.random() * 4294967296) >>> 0;
+})();
+if (typeof console !== 'undefined') console.log(`[world] seed ${WORLD_SEED} — replay with ?seed=${WORLD_SEED}`);
 
 const DEG = Math.PI / 180;
 

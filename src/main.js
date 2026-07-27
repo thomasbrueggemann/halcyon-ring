@@ -160,6 +160,11 @@ const lockPointer = () => {
     if (p && p.catch) p.catch(() => {});
   } catch (_) { /* headless / unsupported */ }
 };
+// Every shift is a different ring. Show which one, so a good draw can be kept.
+{
+  const sub = document.getElementById('title-sub');
+  if (sub) sub.innerHTML += ` · <span style="opacity:.65">ring ${WORLD_SEED}</span>`;
+}
 ui.init({ audio, lockPointer });
 ui.showTitle(() => {
   audio.init();
