@@ -30,6 +30,9 @@ const _txUp2 = new THREE.Vector3();
 const _txMat = new THREE.Matrix4();
 const _txSeat = new THREE.Vector3();
 const _txTmp = new THREE.Vector3();
+const _txTrn = new THREE.Vector3();   // train world pos for the audio spatializer
+const _txEarF = new THREE.Vector3();  // listener forward/up (camera look) for the audio spatializer
+const _txEarU = new THREE.Vector3();
 
 // ── guideway path: full 3-D position + an orthonormal tangent frame ──
 function _railPos(theta, out) {
@@ -888,7 +891,7 @@ function buildTransit(scene, colliders, rng, city) {
   group.add(cabinLight);
 
   const api = {
-    group, trains, stationInfos, player: null, prompt: null, route: ROUTE,
+    group, trains, stationInfos, player: null, audio: null, prompt: null, route: ROUTE,
     seatPos, PLAT_RISE, etaTo, arrivalsAt, nextStation, stationAfter, legTime, DWELL_TIME,
   };
 
@@ -997,6 +1000,27 @@ function buildTransit(scene, colliders, rng, city) {
         const th = tr.theta - tr.dir * i * (CAR_LEN + CAR_GAP) / carR;
         placeCar(th, tr.lane, car.matrix);
       });
+    }
+
+    // ── train audio: position + speed + brake state for each train's
+    //    synthesized monorail sound (spatialized about the player's ears) ──
+    const au = api.audio;
+    if (au && au.ctx) {
+      const p = api.player;
+      const list = [];
+      for (const tr of trains) {
+        _railPos(tr.theta, _txTrn);
+        list.push({
+          id: tr.id, x: _txTrn.x, y: _txTrn.y, z: _txTrn.z, speed: tr.v,
+          braking: tr.state === 'brake' || (tr.state === 'accel' && tr.v < 1.5),
+        });
+      }
+      // anchor the listener's ears to the first-person camera (mouse look):
+      // forward = where the camera looks, up = the camera's up vector
+      const cam = p.camera;
+      _txEarF.set(0, 0, -1).applyQuaternion(cam.quaternion);
+      _txEarU.set(0, 1, 0).applyQuaternion(cam.quaternion);
+      au.updateTrains(list, p.pos.x, p.pos.y, p.pos.z, _txEarF, _txEarU);
     }
 
     // ── departure boards ──

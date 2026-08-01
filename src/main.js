@@ -94,6 +94,7 @@ transit.player = player;
 const gravity = new GravitySystem(rng);
 const ui = new UI();
 const audio = new AudioEngine();
+transit.audio = audio;
 const puzzles = new PuzzleManager({ stations, ui, audio, gravity, player, rng });
 const npcs = buildNPCs(scene, rng);   // appended after all existing rng consumers
 
