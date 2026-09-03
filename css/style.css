@@ -59,7 +59,7 @@ button.ghost { border: none; background: none; font-size: 11px; color: #64798c; 
 #gmeter-fill { height: 100%; width: 100%; background: #69d970; transition: width 0.2s; }
 #gmeter-label { font-size: 12px; color: #b8c9d8; min-width: 48px; }
 #alert {
-  position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+  position: absolute; top: 98px; left: 50%; transform: translateX(-50%);
   padding: 10px 26px; font-size: 15px; letter-spacing: 0.15em; border-radius: 4px;
   animation: flash 1.1s infinite;
 }
@@ -101,12 +101,29 @@ button.ghost { border: none; background: none; font-size: 11px; color: #64798c; 
 .kp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .kp-grid button { padding: 12px 0; font-size: 17px; }
 
-/* ── alignment minigame ── */
-#align {
-  position: absolute; left: 50%; bottom: 34%; transform: translateX(-50%); z-index: 20;
-}
-.align-box {
-  background: rgba(6,12,20,0.85); border: 1px solid rgba(255,180,84,0.6);
-  border-radius: 6px; padding: 14px 16px 10px; text-align: center;
-}
-#align-status { font-size: 12px; letter-spacing: 0.1em; color: #ffd9a0; margin-top: 8px; }
+/* ── minigame panels ── */
+.panel.game { max-width: 480px; padding: 26px 32px 18px; }
+.panel.game.wide { max-width: 680px; }
+.panel.game canvas { display: block; margin: 0 auto; border: 1px solid rgba(105,210,255,0.35); border-radius: 4px; max-width: 100%; }
+.game-status { font-size: 12px; letter-spacing: 0.08em; color: #ffd9a0; margin-top: 12px; min-height: 16px; }
+.game-keys { display: flex; gap: 18px; justify-content: center; font-size: 11.5px; color: #8aa2b5; margin-top: 8px; }
+.game-keys b { color: #cfe3f2; }
+
+/* ── compass strip ── */
+#compass { position: absolute; top: 62px; left: 50%; transform: translateX(-50%); border-radius: 4px; }
+#fault-timer { font-size: 11px; letter-spacing: 0.15em; color: #8aa2b5; min-width: 120px; text-align: right; }
+#fault-timer.warn { color: #ffb020; animation: flash 0.8s infinite; }
+#fault-timer.zero { color: #69d2ff; }
+#fault-timer.ok { color: #54e07a; }
+#objectives li.tracked { color: #ffd166; }
+#objectives li.tracked span { color: #a8862e; }
+#objectives li.hint { font-size: 9.5px; color: #4d6070; letter-spacing: 0.12em; padding-top: 6px; }
+
+/* ── shift report ── */
+#win-report { margin: -6px 0 22px; }
+#win-report .rank { font-size: 14px; letter-spacing: 0.25em; color: #9fdcff; margin-bottom: 14px; }
+#win-report .rank b { font-size: 34px; color: #ffd166; margin: 0 10px; vertical-align: middle; text-shadow: 0 0 18px rgba(255,209,102,0.5); }
+#win-report .rank span { display: block; font-size: 12px; letter-spacing: 0.1em; color: #7d94a8; margin-top: 4px; }
+#win-report ul { list-style: none; text-align: left; font-size: 13px; }
+#win-report li { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(105,210,255,0.12); color: #b8c9d8; }
+#win-report li b { color: #dce8f2; font-weight: 500; }

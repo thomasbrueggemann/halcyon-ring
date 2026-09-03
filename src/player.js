@@ -40,6 +40,13 @@ class Player {
     this.ride = null;              // set by transit when boarding a train
     this.wadeDepth = 0;            // >0 while standing in the river
     this.swimming = false;
+    this.inputLocked = false;      // a modal minigame owns the keyboard
+    this.landing = 0;              // camera dip after a hard landing (m)
+    this.lastImpact = 0;           // vertical speed absorbed on the last landing
+    this.onLand = () => {};
+    this.fwd = new THREE.Vector3();   // yaw-only facing, for the HUD compass
+    this.right = new THREE.Vector3();
+    this.distance = 0;             // metres covered on foot
 
     document.addEventListener('keydown', e => {
       if (e.code === 'Space') e.preventDefault();
@@ -137,10 +144,12 @@ class Player {
     _fwd.set(0, 0, -1).applyQuaternion(_pQ);
     _right.set(1, 0, 0).applyQuaternion(_pQ);
 
+    this.fwd.copy(_fwd); this.right.copy(_right);
     let ix = (this.key('KeyD') ? 1 : 0) - (this.key('KeyA') ? 1 : 0);
     let iz = (this.key('KeyW') ? 1 : 0) - (this.key('KeyS') ? 1 : 0);
     if (ix === 0) ix = this.gp.ix;
     if (iz === 0) iz = this.gp.iz;
+    if (this.inputLocked) { ix = 0; iz = 0; }
 
     if (this.enabled && zeroG) {
       // ── free flight on maneuvering thrusters ──
@@ -151,8 +160,8 @@ class Player {
       _tmp.set(0, 0, -1).applyQuaternion(lookQ);
       _wish.addScaledVector(_tmp, iz);
       _wish.addScaledVector(_right, ix);
-      if ((this.key('Space') || this.gp.jump || this.gp.climb) && !this.suppressSpace) _wish.addScaledVector(_pUp, 1);
-      if (this.key('KeyC') || this.key('ControlLeft') || this.gp.lower) _wish.addScaledVector(_pUp, -1);
+      if ((this.key('Space') || this.gp.jump || this.gp.climb) && !this.suppressSpace && !this.inputLocked) _wish.addScaledVector(_pUp, 1);
+      if ((this.key('KeyC') || this.key('ControlLeft') || this.gp.lower) && !this.inputLocked) _wish.addScaledVector(_pUp, -1);
       if (_wish.lengthSq() > 0) {
         _wish.normalize();
         this.vel.addScaledVector(_wish, THRUST_ACCEL * dt);
@@ -180,7 +189,7 @@ class Player {
       this.vel.copy(_tmp).addScaledVector(_pUp, vUp);
       this.speedAlongGround = _tmp.length();
 
-      if (this.grounded && (this.key('Space') || this.gp.jump) && !this.suppressSpace && gravityScale > 0.25) {
+      if (this.grounded && (this.key('Space') || this.gp.jump) && !this.suppressSpace && !this.inputLocked && gravityScale > 0.25) {
         this.vel.addScaledVector(_pUp, JUMP_SPEED * Math.sqrt(gravityScale));
         this.grounded = false;
       }
@@ -211,6 +220,13 @@ class Player {
       const vUp = this.vel.dot(_pUp);
       if (vUp < 0) this.vel.addScaledVector(_pUp, -vUp * (zeroG ? 1.4 : 1)); // soft bounce in zero-g
       if (!zeroG && !lifted) this.grounded = true;
+      // a hard landing dips the camera and thumps — the drop after a spin-up
+      // is the moment this is for
+      if (!wasGrounded && vUp < -3.5) {
+        this.lastImpact = -vUp;
+        this.landing = Math.min(0.45, (-vUp - 3.5) * 0.045);
+        this.onLand(-vUp);
+      }
     } else if (!zeroG && !lifted && wasGrounded && this.h - g < 0.45) {
       // snap-down: stay in contact when walking downhill so crests don't launch you
       const vUp = this.vel.dot(_pUp);
@@ -315,12 +331,15 @@ class Player {
     if (this.grounded && this.speedAlongGround > 0.5) {
       this.bob += dt * (4 + this.speedAlongGround * 1.1);
       bobOff = Math.sin(this.bob) * 0.045;
+      this.distance += this.speedAlongGround * dt;
     }
+    if (this.landing > 0.001) { bobOff -= this.landing; this.landing *= Math.max(0, 1 - 7 * dt); }
     upAt(this.theta, _pUp);
     torusPosition(this.theta, this.lat, this.h + EYE_HEIGHT + bobOff, this.camera.position);
 
-    // FOV easing (wider in zero-g)
-    this.fovTarget = zeroG ? 82 : 72;
+    // FOV easing (wider in zero-g, a touch wider at a run)
+    const sprinting = this.grounded && this.speedAlongGround > WALK_SPEED + 1.5;
+    this.fovTarget = zeroG ? 82 : sprinting ? 77 : 72;
     this.camera.fov += (this.fovTarget - this.camera.fov) * Math.min(1, 4 * dt);
     this.camera.updateProjectionMatrix();
   }

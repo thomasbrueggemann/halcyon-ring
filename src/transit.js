@@ -49,7 +49,10 @@ function _railFrame(theta) {
   _txUp2.crossVectors(_txFwd, _txRight).normalize();   // re-orthonormalized up
 }
 
-function buildTransit(scene, colliders, rng, city) {
+function buildTransit(scene, colliders, rng, city, textures) {
+  // a texture clone with its own tiling — the shared ones carry the repeat
+  // their first user wanted
+  const tiled = (tex, rx, ry) => { const t = tex.clone(); t.repeat.set(rx, ry); return t; };
   const group = new THREE.Group();
   scene.add(group);
   const RAIL_SEGS = 1200;
@@ -226,17 +229,25 @@ function buildTransit(scene, colliders, rng, city) {
   })();
 
   // ── swept guideway geometry: a profile carried along the winding path ──
-  function sweepPath(profile, segs) {
+  // UVs are metres: u along the path, v around the profile, both over `tile`,
+  // so a panel texture keeps its size whatever the profile or the winding.
+  function sweepPath(profile, segs, tile = 4) {
     const nP = profile.length;
-    const pos = [], idx = [];
+    const pos = [], uv = [], idx = [];
+    const vOff = [0];
+    for (let i = 1; i < nP; i++) vOff.push(vOff[i - 1] + Math.hypot(profile[i][0] - profile[i - 1][0], profile[i][1] - profile[i - 1][1]));
+    let arc = 0;
     for (let s = 0; s <= segs; s++) {
       const theta = (s / segs) * Math.PI * 2;
       _railFrame(theta);
       _railPos(theta, _txP);
+      if (s > 0) arc += _txP.distanceTo(_txB);
+      _txB.copy(_txP);
       for (let i = 0; i < nP; i++) {
         const u = profile[i][0], v = profile[i][1];
         _txA.copy(_txP).addScaledVector(_txRight, u).addScaledVector(_txUp2, v);
         pos.push(_txA.x, _txA.y, _txA.z);
+        uv.push(arc / tile, vOff[i] / tile);
       }
     }
     for (let s = 0; s < segs; s++) {
@@ -247,18 +258,24 @@ function buildTransit(scene, colliders, rng, city) {
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
     geo.setIndex(idx);
     geo.computeVertexNormals();
     return geo;
   }
 
   // deck: a shallow channel (top flat, outer lips drop 0.45 m)
+  // Riveted steel panels, 1.5 m a side (four to a 6 m tile), rust creeping
+  // out of the seams — the guideway is a box girder, not a grey extrusion.
   const deckMat = new THREE.MeshStandardMaterial({
-    color: 0x8d949e, roughness: 0.45, metalness: 0.55, side: THREE.DoubleSide,
+    map: tiled(textures.metal, 1, 1), normalMap: tiled(textures.metalN, 1, 1),
+    roughnessMap: tiled(textures.metalR, 1, 1),
+    color: 0xd4d9de, roughness: 1, metalness: 0.4, side: THREE.DoubleSide,
   });
+  deckMat.normalScale.set(0.8, 0.8);
   const deck = new THREE.Mesh(sweepPath([
     [-RAIL_HALF, -0.45], [-RAIL_HALF, 0], [RAIL_HALF, 0], [RAIL_HALF, -0.45],
-  ], RAIL_SEGS), deckMat);
+  ], RAIL_SEGS, 6), deckMat);
   deck.castShadow = true; deck.receiveShadow = true;
   group.add(deck);
 
@@ -309,7 +326,24 @@ function buildTransit(scene, colliders, rng, city) {
   }
 
   // ── support pylons every ~30 m, ground → deck bottom (variable height) ──
-  const pylonMat = new THREE.MeshStandardMaterial({ color: 0x7a828c, roughness: 0.5, metalness: 0.5 });
+  // The column geometry is unit height and scaled per instance, so a texture
+  // on it would smear 1 tile over 3 m on one pylon and 14 m on the next. The
+  // vertex shader scales the v coordinate by the instance's y scale instead —
+  // one panel course per 2.4 m of column, whatever its height.
+  const pylonMat = new THREE.MeshStandardMaterial({
+    map: tiled(textures.metal, 1, 1 / 2.4), normalMap: tiled(textures.metalN, 1, 1 / 2.4),
+    roughnessMap: tiled(textures.metalR, 1, 1 / 2.4),
+    color: 0xc2c8ce, roughness: 1, metalness: 0.45,
+  });
+  pylonMat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace('#include <uv_vertex>', [
+      '#include <uv_vertex>',
+      '#ifdef USE_INSTANCING',
+      '  float pylonH = length(instanceMatrix[1].xyz);',
+      '  vMapUv.y *= pylonH; vNormalMapUv.y *= pylonH; vRoughnessMapUv.y *= pylonH;',
+      '#endif',
+    ].join('\n'));
+  };
   const colGeo = new THREE.CylinderGeometry(0.32, 0.44, 1, 9);
   colGeo.translate(0, 0.5, 0);                         // base at y=0, unit height
   const capGeo = new THREE.BoxGeometry(1.3, 0.35, 3.0);
@@ -340,16 +374,72 @@ function buildTransit(scene, colliders, rng, city) {
 
   // ── stations: platform + walk-up ramp (height patches), railings, sign,
   //    canopy, bench, light — on the OUTER (−lat) side of the guideway ──
-  const platMat = new THREE.MeshStandardMaterial({ color: 0x9aa2ac, roughness: 0.8, metalness: 0.2 });
+  // Paving on the deck, the same stone as a coursed masonry wall on the fill
+  // below it. UVs are metres / 3 (deck) and metres / 2.4 (walls).
+  const paveTex = [tiled(textures.plaza, 1, 1), tiled(textures.plazaN, 1, 1), tiled(textures.plazaR, 1, 1)];
+  const paveMat = new THREE.MeshStandardMaterial({
+    map: paveTex[0], normalMap: paveTex[1], roughnessMap: paveTex[2],
+    color: 0xd9d6d0, roughness: 1, metalness: 0.05,
+  });
+  const wallMat = new THREE.MeshStandardMaterial({
+    map: paveTex[0], normalMap: paveTex[1], roughnessMap: paveTex[2],
+    color: 0xa39e96, roughness: 1, metalness: 0.05, side: THREE.DoubleSide,
+  });
   const trimMat = new THREE.MeshStandardMaterial({ color: 0x394654, roughness: 0.6, metalness: 0.4 });
   const canopyMat = new THREE.MeshStandardMaterial({ color: 0x2c6e8f, roughness: 0.5, metalness: 0.3, side: THREE.DoubleSide });
   const benchMat = new THREE.MeshStandardMaterial({ color: 0x7a5a38, roughness: 0.9 });
   const postPositions = [];
   const stationInfos = [];
 
-  // flat platform slab (curves negligibly over 24 m — a single box is fine)
-  const slabGeo = new THREE.BoxGeometry(PLAT_WIDTH, 0.25, PLAT_HALFLEN * 2);
-  slabGeo.translate(0, -0.125, 0);
+  // ── platform + walk-up ramp as ONE embankment: a paved deck over a
+  //    masonry-faced fill that runs down into the terrain on both sides and
+  //    is capped at both ends. A floating slab beside a solid ramp read as two
+  //    different structures; this is one. Groups: 0 = paving, 1 = walls. ──
+  function buildEmbankment(samples, innerLat, outerLat) {
+    const DT = 3, WT = 2.4;
+    const pos = [], uv = [], idx = [], v = new THREE.Vector3();
+    const push = (th, lat, h, u, w) => { torusPosition(th, lat, h, v); pos.push(v.x, v.y, v.z); uv.push(u, w); };
+    const n = samples.length;
+    // ring k (6 verts): 0 innerTop/deck 1 outerTop/deck 2 innerTop 3 innerBot 4 outerTop 5 outerBot
+    for (let k = 0; k < n; k++) {
+      const { s, h } = samples[k], th = s / RF;
+      push(th, innerLat, h, s / DT, 0);
+      push(th, outerLat, h, s / DT, (outerLat - innerLat) / DT);
+      for (const lat of [innerLat, outerLat]) {
+        const bot = Math.min(h, terrainH(th, lat)) - 0.3;
+        push(th, lat, h, s / WT, h / WT);
+        push(th, lat, bot, s / WT, bot / WT);
+      }
+    }
+    const deckIdx = [], wallIdx = [];
+    for (let k = 0; k < n - 1; k++) {
+      const a = k * 6, b = a + 6;
+      deckIdx.push(a + 0, b + 0, a + 1, a + 1, b + 0, b + 1);
+      wallIdx.push(a + 2, a + 3, b + 2, a + 3, b + 3, b + 2);
+      wallIdx.push(a + 4, b + 4, a + 5, a + 5, b + 4, b + 5);
+    }
+    // end caps across the strip
+    for (const k of [0, n - 1]) {
+      const { s, h } = samples[k], th = s / RF;
+      const base = pos.length / 3;
+      for (const lat of [innerLat, outerLat]) {
+        const bot = Math.min(h, terrainH(th, lat)) - 0.3;
+        push(th, lat, h, lat / WT, h / WT);
+        push(th, lat, bot, lat / WT, bot / WT);
+      }
+      wallIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setIndex([...deckIdx, ...wallIdx]);
+    g.addGroup(0, deckIdx.length, 0);
+    g.addGroup(deckIdx.length, wallIdx.length, 1);
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, [paveMat, wallMat]);
+    m.receiveShadow = true; m.castShadow = true;
+    return m;
+  }
 
   function buildStation(st) {
     // The platform and its walk-up ramp sit on the +lat side of the guideway —
@@ -368,10 +458,6 @@ function buildTransit(scene, colliders, rng, city) {
 
     // platform standable surface
     addHeightPatch({ s0, s1, lat0: innerLat, lat1: outerLat, h0: PLAT_H, h1: PLAT_H });
-    const slab = new THREE.Mesh(slabGeo, platMat);
-    slab.applyMatrix4(placementMatrix(st.theta, centerLat, PLAT_H, 0, 1));
-    slab.receiveShadow = true; slab.castShadow = true;
-    group.add(slab);
 
     // ── walk-up ramp ──
     // It runs ALONG the ring off the far end of the platform, not out across the
@@ -394,39 +480,13 @@ function buildTransit(scene, colliders, rng, city) {
       s0: rampS0, s1: rampS1,
       lat0: innerLat, lat1: outerLat, h0: PLAT_H, h1: rampBotH, axis: 's',
     });
-    // ramp deck: a strip of quads so it follows its own grade cleanly, with a
-    // skirt down each side hiding the gap over the falling ground
+    // one strip: level platform, then the ramp falling at its own grade
     {
-      const N = 12, pos = [], idx = [], uv = [];
-      const v = new THREE.Vector3();
-      for (let k = 0; k <= N; k++) {
-        const f = k / N;
-        const th = (rampS0 + (rampS1 - rampS0) * f) / RF;
-        const h = PLAT_H + (rampBotH - PLAT_H) * f;
-        for (const lat of [innerLat, outerLat]) {
-          torusPosition(th, lat, h, v);
-          pos.push(v.x, v.y, v.z);
-          uv.push(f * rampLen / 3, (lat - innerLat) / 3);
-          torusPosition(th, lat, Math.min(h, terrainH(th, lat)) - 0.25, v);
-          pos.push(v.x, v.y, v.z);
-          uv.push(f * rampLen / 3, (lat - innerLat) / 3);
-        }
-      }
-      // per station: 0=innerTop 1=innerBot 2=outerTop 3=outerBot
-      for (let k = 0; k < N; k++) {
-        const a = k * 4, b = (k + 1) * 4;
-        idx.push(a + 0, b + 0, a + 2, a + 2, b + 0, b + 2);   // walking surface
-        idx.push(a + 0, a + 1, b + 0, a + 1, b + 1, b + 0);   // inner skirt
-        idx.push(a + 2, b + 2, a + 3, a + 3, b + 2, b + 3);   // outer skirt
-      }
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-      g.setIndex(idx);
-      g.computeVertexNormals();
-      const ramp = new THREE.Mesh(g, platMat);
-      ramp.receiveShadow = true; ramp.castShadow = true;
-      group.add(ramp);
+      const samples = [];
+      const NP = 8, NR = 12;
+      for (let k = 0; k <= NP; k++) samples.push({ s: s0 + (s1 - s0) * k / NP, h: PLAT_H });
+      for (let k = 1; k <= NR; k++) samples.push({ s: rampS0 + (rampS1 - rampS0) * k / NR, h: PLAT_H + (rampBotH - PLAT_H) * k / NR });
+      group.add(buildEmbankment(samples, innerLat, outerLat));
     }
 
     // ── railings: outer platform edge + the far end + both ramp sides

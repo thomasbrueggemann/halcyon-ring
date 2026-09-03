@@ -22,12 +22,14 @@
         and everything inside goes weightless.
         <br><br>
         Five systems around the ring need repairs. Walk (or float) the full circle,
-        fix them all, and stabilize the spin before someone gets hurt.
+        fix them all, and stabilize the spin before someone gets hurt. The faults are
+        getting more frequent — and the gyroscope can only be trued while you are
+        weightless.
       </p>
       <div class="controls">
         <span><b>WASD</b> move</span><span><b>Mouse</b> look</span>
         <span><b>Shift</b> run</span><span><b>Space</b> jump</span>
-        <span><b>E</b> interact</span>
+        <span><b>E</b> interact</span><span><b>Tab</b> track next repair</span>
         <span><b>Zero-g:</b> WASD thrust · Space up · C down</span>
       </div>
       <button id="btn-start">BEGIN SHIFT</button>
@@ -42,7 +44,9 @@
       <div id="stability">RING STABILITY 0/5</div>
       <div id="gmeter"><div id="gmeter-fill"></div></div>
       <div id="gmeter-label">0.94 g</div>
+      <div id="fault-timer"></div>
     </div>
+    <canvas id="compass" width="360" height="30"></canvas>
     <ul id="objectives"></ul>
     <div id="prompt" class="hidden"></div>
     <div id="subtitle"></div>
@@ -64,11 +68,35 @@
     </div>
   </div>
 
-  <!-- Alignment minigame -->
-  <div id="align" class="hidden">
-    <div class="align-box">
-      <canvas id="align-canvas" width="340" height="42"></canvas>
-      <div id="align-status"></div>
+  <!-- Relay routing minigame -->
+  <div id="circuit" class="screen hidden">
+    <div class="panel game">
+      <h2>RELAY GRID ROUTING</h2>
+      <canvas id="circuit-canvas" width="400" height="400"></canvas>
+      <div id="circuit-status" class="game-status"></div>
+      <button id="circuit-cancel" class="ghost">walk away [Esc]</button>
+    </div>
+  </div>
+
+  <!-- Spoke phase lock minigame -->
+  <div id="wave" class="screen hidden">
+    <div class="panel game wide">
+      <h2>SPOKE PHASE LOCK</h2>
+      <canvas id="wave-canvas" width="600" height="240"></canvas>
+      <div id="wave-status" class="game-status"></div>
+      <div class="game-keys"><span><b>W/S</b> frequency</span><span><b>A/D</b> phase</span><span><b>R/F</b> amplitude</span></div>
+      <button id="wave-cancel" class="ghost">walk away [Esc]</button>
+    </div>
+  </div>
+
+  <!-- Dish lock minigame -->
+  <div id="dish" class="screen hidden">
+    <div class="panel game">
+      <h2>UPLINK DISH — CARRIER LOCK</h2>
+      <canvas id="dish-canvas" width="400" height="400"></canvas>
+      <div id="dish-status" class="game-status"></div>
+      <div class="game-keys"><span><b>A/D</b> azimuth</span><span><b>W/S</b> elevation</span></div>
+      <button id="dish-cancel" class="ghost">walk away [Esc]</button>
     </div>
   </div>
 
@@ -85,6 +113,7 @@
     <div class="panel">
       <h1>RING&nbsp;STABILIZED</h1>
       <p id="win-time" class="sub"></p>
+      <div id="win-report"></div>
       <p class="story">The flywheel hums evenly again. Down the curve of the ring,
         streetlights steady, trees settle, and 9,412 people keep living their
         lives — never knowing how close the sky came to standing still.</p>

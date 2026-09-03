@@ -84,7 +84,7 @@ const { stations } = city;
 // The guideway is planned last of the three: it re-routes itself around the
 // buildings the city just put up (and bores through the ones it cannot dodge),
 // which is why it needs a handle on the city.
-const transit = buildTransit(scene, colliders, rng, city);
+const transit = buildTransit(scene, colliders, rng, city, textures);
 buildVegetation(scene, textures, colliders, rng);
 const props = buildProps(scene, textures, rng);
 const hydro = buildHydro(scene, rng);
@@ -121,6 +121,35 @@ const driftGroup = new THREE.Group();
   scene.add(driftGroup);
 }
 
+// ── objective waypoint: a diamond that floats over the tracked repair's
+//    current step, visible through terrain and fog, scaled with distance ──
+const waypoint = (() => {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 160;
+  const g = c.getContext('2d');
+  g.shadowBlur = 18; g.shadowColor = 'rgba(105,210,255,0.9)';
+  g.fillStyle = '#9fdcff';
+  g.beginPath(); g.moveTo(64, 8); g.lineTo(112, 64); g.lineTo(64, 120); g.lineTo(16, 64); g.closePath(); g.fill();
+  g.fillStyle = '#0b1b28';
+  g.beginPath(); g.moveTo(64, 30); g.lineTo(90, 64); g.lineTo(64, 98); g.lineTo(38, 64); g.closePath(); g.fill();
+  g.fillStyle = '#9fdcff';
+  g.beginPath(); g.moveTo(64, 126); g.lineTo(76, 150); g.lineTo(52, 150); g.closePath(); g.fill();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, opacity: 0.9 }));
+  spr.renderOrder = 999;
+  spr.visible = false;
+  scene.add(spr);
+  return spr;
+})();
+const _wpPos = new THREE.Vector3();
+const _wpD = new THREE.Vector3();
+const _wpUp = new THREE.Vector3();
+
+// ── shift statistics ──
+const stats = { zeroTime: 0, rides: 0 };
+let wasRiding = false;
+
 // ── gravity event hookup ──
 let shake = 0;
 gravity.onEvent = name => {
@@ -143,9 +172,15 @@ gravity.onEvent = name => {
   } else if (name === 'restored') {
     ui.setAlert(null);
     if (!gravity.stabilized) {
-      ui.message('VEGA: Gravity nominal — for now. Repair the ring systems before the next fault.', 6);
+      ui.message(gravity.failures >= 2
+        ? `VEGA: Gravity nominal. Fault cadence is increasing — ${gravity.failures} failures so far. Keep moving.`
+        : 'VEGA: Gravity nominal — for now. Repair the ring systems before the next fault.', 6);
     }
   }
+};
+player.onLand = v => {
+  audio.thud(Math.min(3, (v - 3) * 0.5));
+  shake = Math.max(shake, Math.min(0.8, (v - 3) * 0.08));
 };
 
 let startTime = null;
@@ -155,7 +190,14 @@ puzzles.onAllSolved = () => {
   audio.klaxonStop();
   audio.bigChime();
   ui.message('VEGA: All five systems restored. Flywheel stabilized. The ring is safe.', 8);
-  setTimeout(() => ui.showWin((performance.now() - startTime) / 1000), 2600);
+  setTimeout(() => ui.showWin({
+    seconds: (performance.now() - startTime) / 1000,
+    distance: player.distance,
+    failures: gravity.failures,
+    zeroTime: stats.zeroTime,
+    rides: stats.rides,
+    cleanRepairs: Math.max(0, 5 - puzzles.resets - ui.resets),
+  }), 2600);
 };
 
 // ── input / screens ──
@@ -176,10 +218,10 @@ ui.showTitle(() => {
   lockPointer();
   player.enabled = true;
   startTime = performance.now();
-  ui.setObjectives(puzzles.solved);
+  ui.setObjectives(puzzles.solved, puzzles.trackedId());
   ui.setStability(0);
   ui.message('VEGA: Good cycle, engineer. Five systems are down — the status terminal at the plaza lists them.', 8);
-  ui.message('Reach each station along the ring. The map (bottom right) marks them.', 8);
+  ui.message('Follow the compass to the tracked repair. TAB switches which one you are following.', 8);
 });
 
 document.addEventListener('pointerlockchange', () => {
@@ -194,6 +236,10 @@ document.addEventListener('keydown', e => {
   }
   if (e.code === 'KeyG' && player.enabled) {           // sandbox: force a failure
     if (gravity.mode === 'stable' && !gravity.stabilized) gravity.triggerFailure();
+  }
+  if (e.code === 'Tab' && player.enabled) {
+    e.preventDefault();
+    if (!ui.modal) puzzles.cycleTracked();
   }
 });
 
@@ -219,8 +265,11 @@ function animate() {
   const gScale = gravity.gravityScale;
   const lift = gravity.lift;
 
-  player.suppressSpace = ui.modal === 'align';
+  player.inputLocked = !!ui.modal;
+  player.suppressSpace = !!ui.modal;
   player.update(dt, gScale, lift);
+  if (gravity.zeroG) stats.zeroTime += dt;
+  if (!!player.ride !== wasRiding) { wasRiding = !!player.ride; if (wasRiding) stats.rides++; }
   if (player.gpInteractPressed && player.enabled && !ui.modal) {
     if (!transit.tryInteract()) puzzles.tryInteract();
   }
@@ -267,8 +316,29 @@ function animate() {
   });
 
   ui.setGravity(gScale);
+  ui.setFaultTimer(gravity);
   ui.update(dt);
-  ui.drawMinimap(player, puzzles.solved);
+  ui.drawMinimap(player, puzzles.solved, puzzles.trackedId(), transit.trains);
+
+  // ── objective compass + world marker ──
+  const wp = puzzles.waypoint();
+  if (wp && !ui.winShown) {
+    torusPosition(wp.theta, wp.lat, wp.h, _wpPos);
+    _wpD.copy(_wpPos).sub(player.pos);
+    const dist = Math.hypot(arcDelta(player.theta, wp.theta), wp.lat - player.lat, wp.h - player.h);
+    upAt(player.theta, _wpUp);
+    const vertical = _wpD.dot(_wpUp);
+    const bearing = Math.atan2(_wpD.dot(player.right), _wpD.dot(player.fwd));
+    ui.drawCompass(bearing, dist, wp.label, vertical);
+    waypoint.visible = dist > 4;
+    waypoint.position.copy(_wpPos).addScaledVector(_wpUp, 2.2 + Math.sin(t * 2) * 0.3);
+    const s = Math.min(28, Math.max(1.2, dist * 0.028));
+    waypoint.scale.set(s * 0.8, s, 1);
+    waypoint.material.opacity = dist < 12 ? 0.35 + 0.05 * dist : 0.9;
+  } else {
+    ui.drawCompass(0, 0, null, 0);
+    waypoint.visible = false;
+  }
 
   renderer.render(scene, camera);
 }

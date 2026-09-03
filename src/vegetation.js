@@ -13,7 +13,7 @@ function buildVegetation(scene, textures, colliders, rng) {
   const veg = new THREE.Group();
   scene.add(veg);
 
-  const barkMat = new THREE.MeshStandardMaterial({ map: textures.bark, roughness: 0.95 });
+  const barkMat = new THREE.MeshStandardMaterial({ map: textures.bark, normalMap: textures.barkN, roughness: 0.95 });
   const leafTex = textures.leaf.clone();
   leafTex.repeat.set(6, 6);
   const leafMat = new THREE.MeshStandardMaterial({
@@ -788,7 +788,7 @@ function buildVegetation(scene, textures, colliders, rng) {
     const stumpGeo = new THREE.CylinderGeometry(0.42, 0.5, 0.85, 9);
     stumpGeo.translate(1.9, 0.42, 1.4);
     const logGeo = mergeGeometries([trunkGeo, stumpGeo]);
-    const logMat = new THREE.MeshStandardMaterial({ map: textures.bark, color: 0xbba98e, roughness: 1 });
+    const logMat = new THREE.MeshStandardMaterial({ map: textures.bark, normalMap: textures.barkN, color: 0xbba98e, roughness: 1 });
     addInstanced(logGeo, logMat, logs);
   }
 

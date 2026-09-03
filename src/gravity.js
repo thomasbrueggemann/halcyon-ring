@@ -10,6 +10,7 @@ class GravitySystem {
     this.timer = FIRST_FAILURE_AT; // until next event in current mode
     this.stabilized = false;
     this.liftSmoothed = 0;
+    this.failures = 0;             // how many faults the wheel has thrown
     this.onEvent = () => {};       // (name) => {}  name: failing|zero|recovering|restored
   }
 
@@ -49,6 +50,7 @@ class GravitySystem {
     if (this.mode === 'stable' && !this.stabilized) {
       this.mode = 'spindown';
       this.timer = SPIN_DOWN_TIME;
+      this.failures++;
       this.onEvent('failing');
     }
   }
@@ -92,7 +94,10 @@ class GravitySystem {
         if (this.spin >= FULL_SPIN) {
           this.spin = FULL_SPIN;
           this.mode = 'stable';
-          this.timer = FAILURE_INTERVAL_MIN + this.rng() * (FAILURE_INTERVAL_MAX - FAILURE_INTERVAL_MIN);
+          // The fault is getting worse: every failure shortens the calm between
+          // them, down to a floor, so the pressure climbs over a long shift.
+          const k = Math.max(0.55, 1 - 0.08 * this.failures);
+          this.timer = (FAILURE_INTERVAL_MIN + this.rng() * (FAILURE_INTERVAL_MAX - FAILURE_INTERVAL_MIN)) * k;
           this.onEvent('restored');
         }
         break;

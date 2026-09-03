@@ -114,10 +114,10 @@ function buildCity(scene, textures, colliders, rng) {
   // footpath network, facing the way they front, at irregular setbacks, in
   // courtyard clusters ringing small plazas, plus lone hillside cottages.
   const archetypes = [
-    { latD: 8, arcW: 10, wallH: 3.3, roofH: 2.3, wall: textures.wallA, wallE: textures.wallAE, roof: textures.roof },
-    { latD: 9, arcW: 9,  wallH: 6.4, roofH: 1.9, wall: textures.wallB, wallE: textures.wallBE, roof: textures.roofSlate },
-    { latD: 8, arcW: 12, wallH: 3.9, roofH: 2.7, wall: textures.wallC, wallE: textures.wallCE, roof: textures.roof },
-    { latD: 6, arcW: 7,  wallH: 2.9, roofH: 2.0, wall: textures.wallA, wallE: textures.wallAE, roof: textures.roofSlate }, // cottage
+    { latD: 8, arcW: 10, wallH: 3.3, roofH: 2.3, wall: textures.wallA, wallN: textures.wallAN, wallR: textures.wallAR, wallE: textures.wallAE, roof: textures.roof, roofN: textures.roofN, roofR: textures.roofR },
+    { latD: 9, arcW: 9,  wallH: 6.4, roofH: 1.9, wall: textures.wallB, wallN: textures.wallBN, wallR: textures.wallBR, wallE: textures.wallBE, roof: textures.roofSlate, roofN: textures.roofSlateN, roofR: textures.roofSlateR },
+    { latD: 8, arcW: 12, wallH: 3.9, roofH: 2.7, wall: textures.wallC, wallN: textures.wallCN, wallR: textures.wallCR, wallE: textures.wallCE, roof: textures.roof, roofN: textures.roofN, roofR: textures.roofR },
+    { latD: 6, arcW: 7,  wallH: 2.9, roofH: 2.0, wall: textures.wallA, wallN: textures.wallAN, wallR: textures.wallAR, wallE: textures.wallAE, roof: textures.roofSlate, roofN: textures.roofSlateN, roofR: textures.roofSlateR }, // cottage
   ];
   const housePlacements = archetypes.map(() => []);
   const tintPool = [0xffffff, 0xf2e8da, 0xe8eef2, 0xf5e9dc, 0xeae2f0, 0xf0ded0, 0xdfe6ea].map(c => new THREE.Color(c));
@@ -318,7 +318,8 @@ function buildCity(scene, textures, colliders, rng) {
     const wallGeo = new THREE.BoxGeometry(arch.latD, arch.wallH, arch.arcW);
     wallGeo.translate(0, arch.wallH / 2, 0);
     const wallMat = new THREE.MeshStandardMaterial({
-      map: arch.wall, roughness: 0.9,
+      map: arch.wall, normalMap: arch.wallN, roughnessMap: arch.wallR, roughness: 1.0,
+      normalScale: new THREE.Vector2(0.8, 0.8),
       emissiveMap: arch.wallE, emissive: 0xffffff, emissiveIntensity: 0.55,
     });
     houseMeshes[i].push(instancedFrom(wallGeo, wallMat, housePlacements[i]));
@@ -328,7 +329,9 @@ function buildCity(scene, textures, colliders, rng) {
     foundGeo.translate(0, -0.85, 0);
     houseMeshes[i].push(instancedFrom(foundGeo, foundMat, housePlacements[i], { shadow: false }));
     const roofGeo = gableRoofGeometry(arch.latD, arch.arcW, arch.roofH, arch.wallH, true);
-    const roofMat = new THREE.MeshStandardMaterial({ map: arch.roof, roughness: 0.85 });
+    const roofMat = new THREE.MeshStandardMaterial({
+      map: arch.roof, normalMap: arch.roofN, roughnessMap: arch.roofR, roughness: 1.0,
+    });
     houseMeshes[i].push(instancedFrom(roofGeo, roofMat, housePlacements[i]));
     for (const m of houseMeshes[i]) city.add(m);
   });
@@ -436,7 +439,7 @@ function buildCity(scene, textures, colliders, rng) {
     const hall = new THREE.Mesh(
       new THREE.BoxGeometry(14, 9, 26),
       new THREE.MeshStandardMaterial({
-        map: textures.wallB, roughness: 0.8,
+        map: textures.wallB, normalMap: textures.wallBN, roughnessMap: textures.wallBR, roughness: 1,
         emissiveMap: textures.wallBE, emissive: 0xffffff, emissiveIntensity: 0.55,
       })
     );
@@ -540,13 +543,36 @@ function buildCity(scene, textures, colliders, rng) {
   // ════ Engineering Bay — coolant valve puzzle ════
   {
     const thetaP = 48 * DEG;
-    const wallMat = new THREE.MeshStandardMaterial({ map: textures.hull.clone(), roughness: 0.5, metalness: 0.4 });
-    wallMat.map.repeat.set(3, 1.5);
-    const panel = new THREE.Mesh(new THREE.BoxGeometry(0.7, 4.2, 10), wallMat);
-    panel.applyMatrix4(gm(thetaP, -18, 2.1, 0, 1));
+    const wallMat = new THREE.MeshStandardMaterial({
+      map: textures.metal, normalMap: textures.metalN, roughnessMap: textures.metalR,
+      roughness: 1, metalness: 0.55,
+    });
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(0.7, 5.0, 10), wallMat);
+    panel.applyMatrix4(gm(thetaP, -18, 2.5, 0, 1));
     panel.castShadow = true;
     city.add(panel);
-    colliders.addBox(thetaP, -18, 5.2, 0.6, 4.2);
+    colliders.addBox(thetaP, -18, 5.2, 0.6, 5.0);
+    // hazard-striped plinth along the foot of the panel
+    const plinth = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.3, 10.4),
+      new THREE.MeshStandardMaterial({ map: textures.metalHazard, normalMap: textures.metalN, roughness: 0.7, metalness: 0.3 }));
+    plinth.applyMatrix4(gm(thetaP, -17.9, 0.15, 0, 1));
+    city.add(plinth);
+    // the pressure gauge board: a live canvas the puzzle draws into
+    {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024; canvas.height = 256;
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const board = new THREE.Mesh(new THREE.PlaneGeometry(8.4, 2.1),
+        new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+      // hangs on the road-facing (+lat) face of the panel, above the valves
+      board.applyMatrix4(gm(thetaP, -17.62, 3.55, -Math.PI / 2, 1));
+      city.add(board);
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.3, 8.7), wallMat);
+      frame.applyMatrix4(gm(thetaP, -17.7, 3.55, 0, 1));
+      city.add(frame);
+      stations.gaugeBoard = { canvas, ctx: canvas.getContext('2d'), tex };
+    }
 
     stations.valves = [];
     stations.valveLamps = [];
@@ -570,7 +596,7 @@ function buildCity(scene, textures, colliders, rng) {
         new THREE.SphereGeometry(0.16, 10, 8),
         new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0x000000, emissiveIntensity: 2.4 })
       );
-      lamp.applyMatrix4(gm(vTheta, -17.6, 3.1, 0, 1));
+      lamp.applyMatrix4(gm(vTheta, -17.6, 2.25, 0, 1));
       city.add(lamp);
       stations.valveLamps.push(lamp);
     }
@@ -711,7 +737,10 @@ function buildCity(scene, textures, colliders, rng) {
     // Power relay cabinet (fuse destination)
     const relay = new THREE.Group();
     const cab = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.2, 1.6),
-      new THREE.MeshStandardMaterial({ color: 0x7a8492, roughness: 0.4, metalness: 0.5 }));
+      new THREE.MeshStandardMaterial({
+        map: textures.metal, normalMap: textures.metalN, roughnessMap: textures.metalR,
+        roughness: 1, metalness: 0.55,
+      }));
     cab.position.y = 1.1;
     relay.add(cab);
     const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 1.5),
@@ -831,28 +860,65 @@ function buildCity(scene, textures, colliders, rng) {
     city.add(tower);
     colliders.addBox(towerTheta, towerLat, 4.2, 4.2, 2.2);
 
-    // The code itself
+    // The code itself — split in two. The tank carries the first pair, the
+    // pump house on the far bank carries the second, so the hunt crosses the
+    // river instead of ending at the first thing you see from the road.
     const code = Array.from({ length: 4 }, () => Math.floor(rng() * 10));
     stations.code = code;
-    const signCanvas = document.createElement('canvas');
-    signCanvas.width = 512; signCanvas.height = 256;
-    const ctx = signCanvas.getContext('2d');
-    ctx.fillStyle = '#182430'; ctx.fillRect(0, 0, 512, 256);
-    ctx.strokeStyle = '#e8b23c'; ctx.lineWidth = 8; ctx.strokeRect(10, 10, 492, 236);
-    ctx.fillStyle = '#9fb4c4'; ctx.font = 'bold 34px monospace'; ctx.textAlign = 'center';
-    ctx.fillText('OBSERVATORY MAINT.', 256, 62);
-    ctx.fillText('ACCESS CODE', 256, 102);
-    ctx.fillStyle = '#ffd166'; ctx.font = 'bold 92px monospace';
-    ctx.fillText(code.join(' '), 256, 200);
-    const signTex = new THREE.CanvasTexture(signCanvas);
-    signTex.colorSpace = THREE.SRGBColorSpace;
-    const sign = new THREE.Mesh(
-      new THREE.PlaneGeometry(7, 3.5),
-      new THREE.MeshBasicMaterial({ map: signTex })
-    );
+    const makePlate = (lines, big) => {
+      const signCanvas = document.createElement('canvas');
+      signCanvas.width = 512; signCanvas.height = 256;
+      const ctx = signCanvas.getContext('2d');
+      ctx.fillStyle = '#182430'; ctx.fillRect(0, 0, 512, 256);
+      ctx.strokeStyle = '#e8b23c'; ctx.lineWidth = 8; ctx.strokeRect(10, 10, 492, 236);
+      ctx.fillStyle = '#9fb4c4'; ctx.font = 'bold 30px monospace'; ctx.textAlign = 'center';
+      lines.forEach((l, i) => ctx.fillText(l, 256, 56 + i * 36));
+      ctx.fillStyle = '#ffd166'; ctx.font = 'bold 92px monospace';
+      ctx.fillText(big, 256, 208);
+      const signTex = new THREE.CanvasTexture(signCanvas);
+      signTex.colorSpace = THREE.SRGBColorSpace;
+      return new THREE.Mesh(new THREE.PlaneGeometry(7, 3.5), new THREE.MeshBasicMaterial({ map: signTex }));
+    };
+    const sign = makePlate(['OBSERVATORY MAINT.', 'ACCESS CODE 1-2', 'digits 3-4: pump house'], `${code[0]} ${code[1]} _ _`);
     // hang the sign on the road-facing side of the tank (normal toward +lat)
     sign.applyMatrix4(gm(towerTheta, towerLat + 5.15, 21, -Math.PI / 2, 1));
     city.add(sign);
+    stations.codePlates = [{ theta: towerTheta, lat: towerLat + 5, h: 21 }];
+
+    // Pump house on the far (+lat) bank, between the river and the guideway
+    {
+      const pTheta = 243.5 * DEG;
+      const pLat = riverLat(pTheta) + riverHalf(pTheta) + 5.5;
+      const house = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.BoxGeometry(5, 3.4, 6),
+        new THREE.MeshStandardMaterial({
+          map: textures.metal, normalMap: textures.metalN, roughnessMap: textures.metalR,
+          roughness: 1, metalness: 0.5, color: 0xd8dde2,
+        }));
+      body.position.y = 1.7;
+      const roofM = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.25, 6.6),
+        new THREE.MeshStandardMaterial({ color: 0x3a4148, roughness: 0.6, metalness: 0.5 }));
+      roofM.position.y = 3.5;
+      const stack = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 3.5, 10),
+        new THREE.MeshStandardMaterial({ color: 0x8a9098, roughness: 0.5, metalness: 0.6 }));
+      stack.position.set(1.4, 5.2, -1.6);
+      const inlet = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 9, 12),
+        new THREE.MeshStandardMaterial({ color: 0x6d7a5a, roughness: 0.6, metalness: 0.5 }));
+      inlet.rotation.z = Math.PI / 2;
+      inlet.rotation.y = Math.PI / 2;
+      inlet.position.set(0, 0.6, -7);
+      house.add(body, roofM, stack, inlet);
+      house.applyMatrix4(gm(pTheta, pLat, 0, 0, 1));
+      house.traverse(o => { o.castShadow = true; o.receiveShadow = true; });
+      city.add(house);
+      colliders.addBox(pTheta, pLat, 3.2, 2.6, 3.6);
+      const plate2 = makePlate(['PUMP STATION 7', 'ACCESS CODE 3-4', 'see tank for 1-2'], `_ _ ${code[2]} ${code[3]}`);
+      plate2.scale.setScalar(0.42);
+      // on the river-facing (−lat) wall so it is read from the bank
+      plate2.applyMatrix4(gm(pTheta, pLat - 3.05, 2.0, Math.PI / 2, 1));
+      city.add(plate2);
+      stations.codePlates.push({ theta: pTheta, lat: pLat - 3, h: 2 });
+    }
   }
 
   // ════ Observatory Quarter ════
@@ -931,7 +997,7 @@ function buildCity(scene, textures, colliders, rng) {
     const gyroTheta = 300 * DEG;
     const panel = new THREE.Mesh(
       new THREE.BoxGeometry(1.6, 1.6, 0.4),
-      new THREE.MeshStandardMaterial({ color: 0x30363e, roughness: 0.4, metalness: 0.6 })
+      new THREE.MeshStandardMaterial({ map: textures.metal, normalMap: textures.metalN, roughnessMap: textures.metalR, roughness: 1, metalness: 0.6 })
     );
     const screen = new THREE.Mesh(
       new THREE.PlaneGeometry(1.1, 1.1),
@@ -953,6 +1019,32 @@ function buildCity(scene, textures, colliders, rng) {
     ringMark.applyMatrix4(gm(gyroTheta, 6.9, 17, Math.PI, 1));
     city.add(ringMark);
     stations.gyroRing = ringMark;
+
+    // Calibration nodes: three reference beacons hung around the shaft at
+    // increasing height. The gyro can only be trued against all three, and you
+    // can only reach them by flying — so the calibration is a zero-g course.
+    stations.gyroNodes = [];
+    const nodeSpots = [
+      { dArc: 13, lat: 3.5, h: 11 },
+      { dArc: -12, lat: 13, h: 25 },
+      { dArc: 4, lat: 19.5, h: 39 },
+    ];
+    nodeSpots.forEach((n, i) => {
+      const theta = gyroTheta + n.dArc / RF;
+      const grp = new THREE.Group();
+      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.9, 1),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xff7a3a, emissiveIntensity: 2.5, roughness: 0.3 }));
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(2.4, 0.16, 8, 48),
+        new THREE.MeshBasicMaterial({ color: 0xffa060, transparent: true, opacity: 0.8 }));
+      const halo2 = halo.clone(); halo2.rotation.x = Math.PI / 2;
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 200, 10, 1, true),
+        new THREE.MeshBasicMaterial({ color: 0xffa060, transparent: true, opacity: 0.05, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }));
+      const glow = new THREE.PointLight(0xff9050, 1.2, 18);
+      grp.add(core, halo, halo2, beam, glow);
+      grp.applyMatrix4(gm(theta, n.lat, n.h, 0, 1));
+      city.add(grp);
+      stations.gyroNodes.push({ theta, lat: n.lat, h: n.h + groundH(theta, n.lat, Infinity), group: grp, core, halos: [halo, halo2], beam, index: i });
+    });
   }
 
   // ════ Downtown blocks: mid-rise cores that make the ring read as a city ════
@@ -1218,6 +1310,9 @@ function makeTerminal(parent, theta, lat, h, screenColor, colliders = null) {
     new THREE.BoxGeometry(0.9, 0.65, 0.12),
     new THREE.MeshStandardMaterial({ color: 0x39414c, roughness: 0.4, metalness: 0.5 })
   );
+  const glow = new THREE.PointLight(screenColor, 0.6, 4);
+  glow.position.set(0, 1.5, 0.4);
+  g.add(glow);
   head.position.y = 1.35;
   head.rotation.x = -0.5;
   const screen = new THREE.Mesh(

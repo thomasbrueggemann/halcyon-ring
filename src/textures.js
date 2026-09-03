@@ -190,29 +190,47 @@ function makeTextures() {
     const macro = normalizeField(fbmField(S, 3, 4, 11, { gain: 0.55 }));   // clumps and patches
     const fine  = normalizeField(fbmField(S, 24, 4, 12, { gain: 0.5 }));   // blade-scale break-up
     const dry   = normalizeField(fbmField(S, 5, 3, 13, { gain: 0.5 }));    // sun-bleached areas
-    T.grass = albedoFromField(macro, S, (m, f) => {
+    const clov  = normalizeField(fbmField(S, 7, 3, 14, { gain: 0.5 }));    // darker clover drifts
+    const bloom = normalizeField(fbmField(S, 4, 2, 15, { gain: 0.5 }));    // where the wildflowers are
+    T.grass = albedoFromField(macro, S, (m, f, x, y) => {
       const t = m * 0.65 + f * 0.35;
-      return [_mix(42, 88, t), _mix(70, 124, t), _mix(26, 45, t)];
+      let r = _mix(40, 92, t), g = _mix(68, 128, t), b = _mix(24, 44, t);
+      const c = clov[y * S + x];
+      const k = c * c;                                   // clover: darker, bluer, glossier green
+      r = _mix(r, 34, k * 0.5); g = _mix(g, 96, k * 0.5); b = _mix(b, 40, k * 0.5);
+      return [r, g, b];
     }, [26, 26], fine);
-    // second pass: fold the dryness field in, plus fine blade streaks
+    // second pass: fold the dryness field in, plus fine blade streaks and flowers
     {
       const ctx = T.grass.image.getContext('2d');
       const img = ctx.getImageData(0, 0, S, S);
       const d = img.data;
       for (let i = 0; i < S * S; i++) {
         const k = dry[i] * dry[i] * dry[i];              // cubed: sun-bleached patches stay rare
-        d[i * 4]     = _mix(d[i * 4],     _mix(d[i * 4], 146, 0.5), k);
-        d[i * 4 + 1] = _mix(d[i * 4 + 1], _mix(d[i * 4 + 1], 138, 0.5), k);
-        d[i * 4 + 2] = _mix(d[i * 4 + 2], _mix(d[i * 4 + 2], 72, 0.5), k);
+        d[i * 4]     = _mix(d[i * 4],     _mix(d[i * 4], 152, 0.55), k);
+        d[i * 4 + 1] = _mix(d[i * 4 + 1], _mix(d[i * 4 + 1], 140, 0.55), k);
+        d[i * 4 + 2] = _mix(d[i * 4 + 2], _mix(d[i * 4 + 2], 70, 0.55), k);
       }
       ctx.putImageData(img, 0, 0);
       ctx.globalAlpha = 0.5;
-      for (let i = 0; i < 5200; i++) {
+      for (let i = 0; i < 6000; i++) {
         const x = rng() * S, y = rng() * S, g = 88 + rng() * 76;
         ctx.strokeStyle = `rgba(${g * 0.5},${g},${g * 0.32},0.5)`;
         ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(x, y);
         ctx.lineTo(x + (rng() - 0.5) * 5, y - 3 - rng() * 6); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      // wildflowers: tiny heads clustered where the bloom field is high, so
+      // they come in drifts rather than an even sprinkle
+      const petals = ['#f6f1e2', '#f7e26b', '#e8a4c8', '#b9a0e6', '#ffffff'];
+      for (let i = 0; i < 1800; i++) {
+        const x = rng() * S, y = rng() * S;
+        const bl = bloom[(y | 0) * S + (x | 0)];
+        if (rng() > bl * bl * bl * 1.4) continue;
+        ctx.fillStyle = petals[Math.floor(rng() * petals.length)];
+        ctx.globalAlpha = 0.5 + rng() * 0.4;
+        ctx.beginPath(); ctx.arc(x, y, 0.7 + rng() * 0.9, 0, 7); ctx.fill();
       }
       ctx.globalAlpha = 1;
       T.grass.needsUpdate = true;
@@ -221,27 +239,39 @@ function makeTextures() {
     const bump = new Float32Array(S * S);
     for (let i = 0; i < bump.length; i++) bump[i] = macro[i] * 0.55 + fine[i] * 0.45;
     T.grassN = normalMapFromField(bump, S, 0.9, [26, 26]);
-    T.grassR = grayMapFromField(macro, S, 0.98, 0.80, [26, 26]);
+    const rough = new Float32Array(S * S);
+    for (let i = 0; i < rough.length; i++) rough[i] = macro[i] * (1 - clov[i] * clov[i] * 0.5);
+    T.grassR = grayMapFromField(rough, S, 0.99, 0.78, [26, 26]);
   }
 
   // ════════════════════ GROUND LAYER 2 — rock/scree ════════════════════
   {
     const strata = normalizeField(fbmField(S, 4, 5, 21, { gain: 0.55, ridged: true, warp: 26 }));
     const grit   = normalizeField(fbmField(S, 40, 3, 22, { gain: 0.5 }));
-    T.rock = albedoFromField(strata, S, (v, g) => {
+    const moss   = normalizeField(fbmField(S, 6, 4, 23, { gain: 0.5 }));    // lichen + moss colonies
+    const vein   = normalizeField(fbmField(S, 9, 3, 24, { gain: 0.5, ridged: true, warp: 40 }));
+    T.rock = albedoFromField(strata, S, (v, g, x, y) => {
       const t = v * 0.75 + g * 0.25;
       // cool grey stone with warm iron staining in the crevices
       const warm = Math.pow(1 - v, 2.2);
-      return [
-        _mix(58, 122, t) + warm * 20,
-        _mix(57, 117, t) + warm * 9,
-        _mix(55, 110, t) - warm * 4,
-      ];
+      let r = _mix(58, 126, t) + warm * 22, gg = _mix(57, 120, t) + warm * 9, b = _mix(55, 112, t) - warm * 4;
+      const i = y * S + x;
+      const q = vein[i];                                 // pale quartz veins
+      if (q > 0.86) { const k = (q - 0.86) / 0.14; r = _mix(r, 190, k); gg = _mix(gg, 186, k); b = _mix(b, 178, k); }
+      // moss grows in the hollows (low strata) where the moss field says so
+      const m = Math.pow(moss[i], 2.5) * (1 - v) * 1.6;
+      if (m > 0) { const k = Math.min(1, m); r = _mix(r, 74, k); gg = _mix(gg, 108, k); b = _mix(b, 42, k); }
+      // pale lichen rosettes on the exposed faces
+      const l = Math.pow(1 - moss[i], 6) * v;
+      if (l > 0.25) { const k = Math.min(1, (l - 0.25) * 2.5); r = _mix(r, 176, k); gg = _mix(gg, 184, k); b = _mix(b, 150, k); }
+      return [r, gg, b];
     }, [16, 16], grit);
     const bump = new Float32Array(S * S);
     for (let i = 0; i < bump.length; i++) bump[i] = strata[i] * 0.8 + grit[i] * 0.2;
     T.rockN = normalMapFromField(bump, S, 5.5, [16, 16]);
-    T.rockR = grayMapFromField(strata, S, 0.92, 0.62, [16, 16]);
+    const rough = new Float32Array(S * S);
+    for (let i = 0; i < rough.length; i++) rough[i] = strata[i] * 0.7 + Math.pow(moss[i], 2.5) * 0.3;
+    T.rockR = grayMapFromField(rough, S, 0.94, 0.62, [16, 16]);
   }
 
   // ════════════════════ GROUND LAYER 3 — sand / river shingle ════════════
@@ -313,30 +343,87 @@ function makeTextures() {
     T.gravel = T.dirt; T.gravelN = T.dirtN;
   }
 
-  // ════════════════════ Concrete / paving ════════════════════
+  // ════════════════════ Concrete / paving — flagstones ════════════════════
+  // Real pavers: a running bond of stones with varying widths and course
+  // heights, each with its own tone, a bevelled edge, and a dark joint. The
+  // albedo, normal and roughness are all derived from ONE height field so the
+  // bevels catch light exactly where the joint lines are drawn.
   {
     const blot = normalizeField(fbmField(S, 6, 4, 61, { gain: 0.5 }));
     const pore = normalizeField(fbmField(S, 70, 2, 62, { gain: 0.5 }));
-    T.plaza = albedoFromField(blot, S, (v, p) => {
-      const t = v * 0.6 + p * 0.4;
-      const g = _mix(92, 142, t);
-      return [g * 1.02, g, g * 0.95];
+    const stain = normalizeField(fbmField(S, 3, 3, 63, { gain: 0.6 }));
+    const height = new Float32Array(S * S).fill(0);
+    const stoneId = new Int32Array(S * S).fill(-1);
+    const tones = [];
+    const prng = mulberry32(6161);
+    const JOINT = 3, BEVEL = 5;
+    // courses: heights 40..72 px, filling the 512 exactly (last course absorbs)
+    let y = 0, course = 0, id = 0;
+    const rowsY = [];
+    while (y < S) { const h = 40 + Math.floor(prng() * 32); rowsY.push([y, Math.min(S, y + h)]); y += h; course++; }
+    rowsY[rowsY.length - 1][1] = S;
+    for (const [y0, y1] of rowsY) {
+      let x = Math.floor(prng() * 40);
+      const startX = x;
+      const stones = [];
+      while (x < S + startX) { const w = 48 + Math.floor(prng() * 70); stones.push([x, Math.min(S + startX, x + w)]); x += w; }
+      for (const [x0, x1] of stones) {
+        const tone = 0.78 + prng() * 0.34, hue = prng();
+        tones.push([tone, hue]);
+        for (let yy = y0; yy < y1; yy++) {
+          for (let xx = x0; xx < x1; xx++) {
+            const px = ((xx % S) + S) % S;
+            const dEdge = Math.min(xx - x0, x1 - 1 - xx, yy - y0, y1 - 1 - yy);
+            const i = yy * S + px;
+            if (dEdge < JOINT) { height[i] = 0; continue; }
+            const t = Math.min(1, (dEdge - JOINT) / BEVEL);
+            height[i] = (0.55 + 0.45 * (t * t * (3 - 2 * t))) * (0.9 + 0.1 * tone);
+            stoneId[i] = id;
+          }
+        }
+        id++;
+      }
+    }
+    T.plaza = albedoFromField(blot, S, (v, p, x, y) => {
+      const i = y * S + x;
+      const t = v * 0.55 + p * 0.45;
+      const sid = stoneId[i];
+      if (sid < 0) return [58 - p * 14, 55 - p * 12, 50 - p * 10];      // joint: dark, gritty
+      const [tone, hue] = tones[sid];
+      let g = _mix(118, 168, t) * tone;
+      // sandstone → limestone → blue-grey: three quarry tones across the pavers
+      let r = g * (hue < 0.33 ? 1.06 : hue < 0.66 ? 1.0 : 0.94);
+      let bl = g * (hue < 0.33 ? 0.86 : hue < 0.66 ? 0.94 : 1.04);
+      // bevel: the rounded edge reads lighter on top
+      const h = height[i];
+      const k = 0.82 + 0.28 * h;
+      r *= k; g *= k; bl *= k;
+      // weathering stains and damp, very low frequency
+      const s = Math.pow(stain[i], 3) * 0.35;
+      return [r * (1 - s), g * (1 - s * 0.9), bl * (1 - s * 0.7)];
     }, [7, 7], pore);
-    {   // slab joints
+    {   // hairline cracks and a few chipped corners
       const ctx = T.plaza.image.getContext('2d');
-      ctx.strokeStyle = 'rgba(58,56,52,0.42)'; ctx.lineWidth = 2.5;
-      for (let i = 0; i <= 4; i++) {
-        ctx.beginPath(); ctx.moveTo(i * S / 4, 0); ctx.lineTo(i * S / 4, S); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(0, i * S / 4); ctx.lineTo(S, i * S / 4); ctx.stroke();
+      ctx.strokeStyle = 'rgba(40,36,32,0.55)';
+      for (let i = 0; i < 18; i++) {
+        ctx.lineWidth = 0.8 + rng() * 1.2;
+        ctx.beginPath();
+        let x = rng() * S, y = rng() * S;
+        ctx.moveTo(x, y);
+        for (let k = 0; k < 6; k++) { x += (rng() - 0.5) * 26; y += (rng() - 0.5) * 26; ctx.lineTo(x, y); }
+        ctx.stroke();
       }
       T.plaza.needsUpdate = true;
     }
     T.concrete = T.plaza;
     const bump = new Float32Array(S * S);
-    for (let i = 0; i < bump.length; i++) bump[i] = pore[i] * 0.7 + blot[i] * 0.3;
-    T.plazaN = normalMapFromField(bump, S, 1.2, [7, 7]);
+    for (let i = 0; i < bump.length; i++) bump[i] = height[i] * 0.8 + pore[i] * 0.08 + blot[i] * 0.12;
+    T.plazaN = normalMapFromField(bump, S, 2.4, [7, 7]);
     T.concreteN = T.plazaN;
-    T.plazaR = grayMapFromField(blot, S, 0.86, 0.6, [7, 7]);
+    const rough = new Float32Array(S * S);
+    for (let i = 0; i < rough.length; i++) rough[i] = stoneId[i] < 0 ? 1 : 0.35 + blot[i] * 0.45;
+    T.plazaR = grayMapFromField(rough, S, 0.55, 1.0, [7, 7]);
+    T.concreteR = T.plazaR;
   }
 
   // ════════════════════ Water ════════════════════
@@ -392,6 +479,7 @@ function makeTextures() {
       T.hull.needsUpdate = true;
     }
     T.hullN = normalMapFromField(wear, S, 1.0, [180, 3]);
+    T.hullR = grayMapFromField(wear, S, 0.28, 0.62, [180, 3]);
   }
 
   // ════════════════════ Detail overlay ════════════════════
@@ -417,92 +505,233 @@ function makeTextures() {
     }
   });
 
-  // ── House wall variants: plaster with framed windows + a door ──
-  function wallDraw(base, trim) {
-    return (ctx, w, h) => {
-      noiseFill(ctx, w, h, rng, base, 0.05, 2500);
-      const rows = 2, cols = 4;
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          if (r === rows - 1 && c === 1) { // door
-            ctx.fillStyle = trim;
-            ctx.fillRect(c * w / cols + w * 0.06, h * 0.55, w * 0.13, h * 0.45);
-            ctx.fillStyle = '#2a2622';
-            ctx.fillRect(c * w / cols + w * 0.075, h * 0.57, w * 0.10, h * 0.43);
+  // ════════════════════ House walls ════════════════════
+  // Three claddings — warm stucco, painted clapboard, brick — each built from
+  // one HEIGHT FIELD that the albedo, the normal map and the roughness map all
+  // read, so the windows are actually recessed, the sills throw a highlight
+  // and the board laps step in the light. The window grid is deterministic so
+  // the lit-window emissive maps line up with it.
+  const WALL_W = 512, WALL_H = 256;
+  const winGrid = () => {
+    const cells = [];
+    const rows = 2, cols = 4;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const door = r === rows - 1 && c === 1;
+        const x = c * WALL_W / cols + WALL_W * 0.05, y = r * WALL_H / rows + WALL_H * 0.12;
+        cells.push(door
+          ? { door: true, x: c * WALL_W / cols + WALL_W * 0.06, y: WALL_H * 0.55, w: WALL_W * 0.13, h: WALL_H * 0.45 }
+          : { door: false, x, y, w: WALL_W * 0.15, h: WALL_H * 0.28 });
+      }
+    }
+    return cells;
+  };
+  const WIN_CELLS = winGrid();
+  function wallSet({ base, trim, style, seed }) {
+    const W = WALL_W, H = WALL_H;
+    const relief = normalizeField(fbmField(256, 18, 3, seed, { gain: 0.5 }));
+    const grime  = normalizeField(fbmField(256, 4, 3, seed + 7, { gain: 0.55 }));
+    const height = new Float32Array(W * H);
+    const kind = new Uint8Array(W * H);          // 0 wall 1 frame 2 glass 3 sill 4 door
+    const rel = (x, y) => relief[((y & 255) * 256) + (x & 255)];
+    // wall body
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let h = 0.5 + (rel(x, y) - 0.5) * 0.10;
+        if (style === 'board') {
+          // horizontal laps every 14 px: a step up then a slow fall
+          const f = (y % 14) / 14;
+          h += 0.10 - f * 0.14 + (f < 0.12 ? -0.08 : 0);
+        } else if (style === 'brick') {
+          const course = Math.floor(y / 9), fy = y % 9;
+          const off = (course & 1) ? 12 : 0;
+          const fx = (x + off) % 24;
+          const mortar = fy < 2 || fx < 2;
+          h = mortar ? 0.34 + rel(x, y) * 0.04 : 0.5 + (rel(x * 3, y * 3) - 0.5) * 0.12
+            + 0.03 * Math.sin((fx / 24) * Math.PI) ;
+        }
+        height[y * W + x] = h;
+      }
+    }
+    // windows / door carved in
+    for (const c of WIN_CELLS) {
+      const x0 = Math.round(c.x), y0 = Math.round(c.y), x1 = Math.round(c.x + c.w), y1 = Math.round(c.y + c.h);
+      for (let y = y0 - 5; y < y1 + 8; y++) {
+        for (let x = x0 - 5; x < x1 + 5; x++) {
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          const i = y * W + x;
+          const inFrame = x >= x0 - 5 && x < x1 + 5 && y >= y0 - 5 && y < y1 + 5;
+          const inGlass = x >= x0 && x < x1 && y >= y0 && y < y1;
+          if (c.door) {
+            if (inGlass) { height[i] = 0.40; kind[i] = 4; }
+            else if (inFrame) { height[i] = 0.62; kind[i] = 1; }
             continue;
           }
-          const x = c * w / cols + w * 0.05, y = r * h / rows + h * 0.12;
-          const ww = w * 0.15, wh = h * 0.28;
-          ctx.fillStyle = trim; ctx.fillRect(x - 4, y - 4, ww + 8, wh + 8);
-          const sky = ctx.createLinearGradient(x, y, x, y + wh);
-          sky.addColorStop(0, '#b7d3e6'); sky.addColorStop(1, '#5a748a');
-          ctx.fillStyle = sky; ctx.fillRect(x, y, ww, wh);
-          ctx.strokeStyle = trim; ctx.lineWidth = 3;
-          ctx.beginPath(); ctx.moveTo(x + ww / 2, y); ctx.lineTo(x + ww / 2, y + wh);
-          ctx.moveTo(x, y + wh / 2); ctx.lineTo(x + ww, y + wh / 2); ctx.stroke();
-          // sill + lintel shadow so the opening reads as recessed
-          ctx.fillStyle = 'rgba(0,0,0,0.22)';
-          ctx.fillRect(x, y, ww, 3);
-          ctx.fillStyle = 'rgba(255,255,255,0.16)';
-          ctx.fillRect(x - 4, y + wh + 4, ww + 8, 3);
+          if (y >= y1 + 5 && x >= x0 - 6 && x < x1 + 6) { height[i] = 0.68; kind[i] = 3; continue; }   // sill
+          if (inGlass) {
+            // recessed glazing with a mullion cross standing proud of it
+            const mx = Math.abs(x - (x0 + x1) / 2) < 1.5, my = Math.abs(y - (y0 + y1) / 2) < 1.5;
+            height[i] = mx || my ? 0.46 : 0.26;
+            kind[i] = mx || my ? 1 : 2;
+          } else if (inFrame) { height[i] = 0.60; kind[i] = 1; }
         }
       }
-    };
-  }
-  T.wallA = canvasTexture([512, 256], wallDraw('#d8cfc0', '#7d6a55'));
-  T.wallB = canvasTexture([512, 256], wallDraw('#c2ccd4', '#4c5a66'));
-  T.wallC = canvasTexture([512, 256], wallDraw('#d9c4a9', '#8a5a40'));
-  {   // one shared plaster relief map for all three
-    const f = normalizeField(fbmField(256, 20, 3, 101, { gain: 0.5 }));
-    T.wallN = normalMapFromField(f, 256, 1.0, [1, 1]);
-  }
-
-  // matching lit-window emissive maps (same deterministic window grid)
-  function wallEmissive() {
-    return canvasTexture([512, 256], (ctx, w, h) => {
-      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
-      const rows = 2, cols = 4;
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          if (r === rows - 1 && c === 1) continue;      // the door
-          if (rng() > 0.42) continue;
-          const x = c * w / cols + w * 0.05, y = r * h / rows + h * 0.12;
-          ctx.fillStyle = rng() < 0.8 ? '#ffd9a0' : '#d7e8f2';
-          ctx.fillRect(x, y, w * 0.15, h * 0.28);
+    }
+    const [br, bg, bb] = base, [tr, tg, tb] = trim;
+    const c = _canvas([W, H]);
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(W, H);
+    const d = img.data;
+    const prng = mulberry32(seed);
+    const brickTone = new Float32Array(64 * 64);
+    for (let i = 0; i < brickTone.length; i++) brickTone[i] = prng();
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x, k = kind[i];
+        const r0 = rel(x, y), g0 = grime[((y >> 1) & 255) * 256 + ((x >> 1) & 255)];
+        let r, g, b;
+        if (k === 2) {         // glass: sky gradient, slightly greenish
+          const t = (y - 0) / H;
+          r = _mix(176, 84, t); g = _mix(206, 112, t); b = _mix(224, 136, t);
+        } else if (k === 1 || k === 3) {
+          const l = k === 3 ? 1.12 : 0.98 + (r0 - 0.5) * 0.1;
+          r = tr * l; g = tg * l; b = tb * l;
+        } else if (k === 4) {
+          r = 46 + r0 * 10; g = 40 + r0 * 8; b = 34 + r0 * 6;
+          if (((y - 140) % 34) < 3) { r *= 0.7; g *= 0.7; b *= 0.7; }         // door panels
+        } else if (style === 'brick') {
+          const course = Math.floor(y / 9), off = (course & 1) ? 12 : 0;
+          const bx = Math.floor((x + off) / 24), mortar = (y % 9) < 2 || ((x + off) % 24) < 2;
+          if (mortar) { const l = 0.9 + r0 * 0.2; r = 168 * l; g = 160 * l; b = 148 * l; }
+          else {
+            const tn = brickTone[((course & 63) * 64) + (bx & 63)];
+            const l = 0.8 + tn * 0.4, warm = tn < 0.25 ? 0.85 : tn > 0.85 ? 1.12 : 1;
+            r = br * l * warm; g = bg * l; b = bb * l * (2 - warm);
+            r *= 0.94 + r0 * 0.12; g *= 0.94 + r0 * 0.12; b *= 0.94 + r0 * 0.12;
+          }
+        } else {
+          const l = 0.9 + r0 * 0.2 + (style === 'board' ? 0.08 - ((y % 14) / 14) * 0.16 : 0);
+          r = br * l; g = bg * l; b = bb * l;
         }
+        // grime: darker toward the bottom of the wall and in the low patches
+        const dirt = (g0 * g0) * 0.35 * (0.4 + 0.6 * (y / H));
+        r *= 1 - dirt; g *= 1 - dirt * 0.95; b *= 1 - dirt * 0.85;
+        d[i * 4] = r; d[i * 4 + 1] = g; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    // drip streaks under every sill
+    ctx.fillStyle = 'rgba(30,26,22,0.16)';
+    for (const w of WIN_CELLS) {
+      if (w.door) continue;
+      for (let s = 0; s < 4; s++) {
+        const x = w.x + 4 + prng() * (w.w - 8);
+        ctx.fillRect(x, w.y + w.h + 8, 1.5, 10 + prng() * 30);
+      }
+    }
+    const map = _makeTexture(c, { repeat: [1, 1] });
+    // the normal map is built at the wall's own aspect ratio: a square Sobel
+    // over a 2:1 image would double the slope in one axis
+    const nc = _canvas([W, H]);
+    const nctx = nc.getContext('2d');
+    const nimg = nctx.createImageData(W, H);
+    const nd = nimg.data;
+    const at = (x, y) => height[(((y % H) + H) % H) * W + (((x % W) + W) % W)];
+    const strength = 3.2;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const gx = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+        const gy = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+        let nx = -gx * strength, ny = -gy * strength, nz = 1;
+        const inv = 1 / Math.hypot(nx, ny, nz);
+        const i = (y * W + x) * 4;
+        nd[i] = (nx * inv * 0.5 + 0.5) * 255; nd[i + 1] = (ny * inv * 0.5 + 0.5) * 255; nd[i + 2] = (nz * inv * 0.5 + 0.5) * 255; nd[i + 3] = 255;
+      }
+    }
+    nctx.putImageData(nimg, 0, 0);
+    const normal = _makeTexture(nc, { repeat: [1, 1], srgb: false });
+    const rc = _canvas([W, H]);
+    const rctx = rc.getContext('2d');
+    const rimg = rctx.createImageData(W, H);
+    const rd = rimg.data;
+    for (let i = 0; i < W * H; i++) {
+      const k = kind[i];
+      const v = (k === 2 ? 0.12 : k === 1 || k === 3 ? 0.55 : k === 4 ? 0.7 : style === 'brick' ? 0.92 : 0.86) * 255;
+      rd[i * 4] = rd[i * 4 + 1] = rd[i * 4 + 2] = v; rd[i * 4 + 3] = 255;
+    }
+    rctx.putImageData(rimg, 0, 0);
+    const rough = _makeTexture(rc, { repeat: [1, 1], srgb: false });
+    // lit windows, same grid
+    const emissive = canvasTexture([W, H], (ectx, w, h) => {
+      ectx.fillStyle = '#000'; ectx.fillRect(0, 0, w, h);
+      for (const cell of WIN_CELLS) {
+        if (cell.door || rng() > 0.42) continue;
+        ectx.fillStyle = rng() < 0.8 ? '#ffd9a0' : '#d7e8f2';
+        ectx.fillRect(cell.x, cell.y, cell.w, cell.h);
+        // curtain: half the lit windows show a soft darker band
+        if (rng() < 0.5) { ectx.fillStyle = 'rgba(0,0,0,0.35)'; ectx.fillRect(cell.x, cell.y, cell.w * 0.4, cell.h); }
       }
     });
+    return { map, normal, rough, emissive };
   }
-  T.wallAE = wallEmissive();
-  T.wallBE = wallEmissive();
-  T.wallCE = wallEmissive();
+  {
+    const A = wallSet({ base: [222, 208, 186], trim: [122, 104, 84], style: 'stucco', seed: 101 });
+    const B = wallSet({ base: [190, 202, 210], trim: [62, 74, 86], style: 'board', seed: 102 });
+    const C = wallSet({ base: [172, 92, 70], trim: [206, 196, 180], style: 'brick', seed: 103 });
+    T.wallA = A.map; T.wallAN = A.normal; T.wallAR = A.rough; T.wallAE = A.emissive;
+    T.wallB = B.map; T.wallBN = B.normal; T.wallBR = B.rough; T.wallBE = B.emissive;
+    T.wallC = C.map; T.wallCN = C.normal; T.wallCR = C.rough; T.wallCE = C.emissive;
+    T.wallN = A.normal;    // legacy shared relief
+  }
 
   // mid-rise city blocks: window-grid facade + lit-window emissive pair
   function blockPair(floors, base, trim) {
     const litRects = [];
+    const facade = normalizeField(fbmField(256, 6, 3, 121 + floors, { gain: 0.5 }));
     const map = canvasTexture([512, 512], (ctx, w, h) => {
-      noiseFill(ctx, w, h, rng, base, 0.05, 2600);
+      // concrete panel facade with a faint fbm wash instead of pixel static
+      const img = ctx.createImageData(w, h);
+      const d = img.data;
+      const [br, bg, bb] = base;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const v = facade[((y >> 1) & 255) * 256 + ((x >> 1) & 255)];
+        const l = 0.88 + v * 0.24, i = (y * w + x) * 4;
+        d[i] = br * l; d[i + 1] = bg * l; d[i + 2] = bb * l; d[i + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
       const cols = 7;
       const gY = h * 0.82;                 // storefront band below
       const floorH = gY / floors;
+      const [tr, tg, tb] = trim;
+      const trimCss = `rgb(${tr},${tg},${tb})`;
       for (let f = 0; f < floors; f++) {
         // spandrel band between floors reads as a real slab edge
-        ctx.fillStyle = 'rgba(0,0,0,0.10)';
-        ctx.fillRect(0, f * floorH, w, 3);
+        ctx.fillStyle = 'rgba(0,0,0,0.14)';
+        ctx.fillRect(0, f * floorH, w, 4);
+        ctx.fillStyle = 'rgba(255,255,255,0.10)';
+        ctx.fillRect(0, f * floorH + 4, w, 2);
         for (let c = 0; c < cols; c++) {
           const x = (c + 0.18) * (w / cols), y = f * floorH + floorH * 0.22;
           const ww = (w / cols) * 0.64, wh = floorH * 0.56;
-          ctx.fillStyle = trim; ctx.fillRect(x - 3, y - 3, ww + 6, wh + 6);
+          ctx.fillStyle = trimCss; ctx.fillRect(x - 3, y - 3, ww + 6, wh + 6);
           const sky = ctx.createLinearGradient(0, y, 0, y + wh);
-          sky.addColorStop(0, '#8fa9bd'); sky.addColorStop(1, '#42566a');
+          sky.addColorStop(0, '#9fb8cb'); sky.addColorStop(0.5, '#5f7a90'); sky.addColorStop(1, '#3a4c5e');
           ctx.fillStyle = sky; ctx.fillRect(x, y, ww, wh);
-          ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(x, y, ww, 2.5);
+          // interior reflection: a soft diagonal sheen across the pane
+          const sheen = ctx.createLinearGradient(x, y, x + ww, y + wh);
+          sheen.addColorStop(0, 'rgba(255,255,255,0)'); sheen.addColorStop(0.45, 'rgba(255,255,255,0.14)'); sheen.addColorStop(0.55, 'rgba(255,255,255,0)');
+          ctx.fillStyle = sheen; ctx.fillRect(x, y, ww, wh);
+          ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fillRect(x, y, ww, 3);
+          ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(x, y, 2, wh);
           if (rng() < 0.4) litRects.push([x, y, ww, wh, false]);
         }
       }
-      ctx.fillStyle = trim; ctx.fillRect(0, gY, w, h - gY);
+      ctx.fillStyle = trimCss; ctx.fillRect(0, gY, w, h - gY);
       ctx.fillStyle = '#1d2833';
       ctx.fillRect(w * 0.04, gY + 8, w * 0.92, h - gY - 20);
+      // shopfront mullions
+      ctx.fillStyle = trimCss;
+      for (let k = 1; k < 6; k++) ctx.fillRect(w * 0.04 + k * (w * 0.92 / 6) - 2, gY + 8, 4, h - gY - 20);
       litRects.push([w * 0.04, gY + 8, w * 0.92, h - gY - 20, true]);
     });
     const emissive = canvasTexture([512, 512], (ctx, w, h) => {
@@ -514,47 +743,205 @@ function makeTextures() {
     });
     return { map, emissive };
   }
-  T.blockA = blockPair(4, '#b9b2a6', '#4a5560');
-  T.blockB = blockPair(6, '#9fa8b2', '#39424c');
-  T.blockC = blockPair(3, '#c4b49e', '#5a4a3a');
+  T.blockA = blockPair(4, [185, 178, 166], [74, 85, 96]);
+  T.blockB = blockPair(6, [159, 168, 178], [57, 66, 76]);
+  T.blockC = blockPair(3, [196, 180, 158], [90, 74, 58]);
 
-  T.roof = canvasTexture([256, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#7c4c3c', 0.08, 2500);
-    for (let y = 0; y < h; y += 16) {
-      // pantile courses with a highlight ridge and a shadow gap
-      ctx.fillStyle = 'rgba(255,196,150,0.14)';
-      ctx.fillRect(0, y + 2, w, 4);
-      ctx.strokeStyle = 'rgba(30,18,14,0.5)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-      for (let x = (y / 16) % 2 ? 16 : 0; x < w; x += 32) {
-        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 16); ctx.stroke();
+  // ════════════════════ Roofs ════════════════════
+  // Pantiles: an S-profile across each tile plus the lap step down every
+  // course, as one height field; the albedo reads it (light on the crown,
+  // shadow under the lap) and so does the normal map, so the courses actually
+  // catch the sun. Slates: staggered rectangles with a chipped edge and a
+  // per-slate tone.
+  {
+    const R = 256, TW = 32, CH = 16;
+    const grain = normalizeField(fbmField(R, 24, 3, 131, { gain: 0.5 }));
+    const weath = normalizeField(fbmField(R, 3, 3, 132, { gain: 0.6 }));
+    const height = new Float32Array(R * R);
+    const tileTone = new Float32Array(R * R);
+    const prng = mulberry32(777);
+    const tones = new Float32Array(64 * 64);
+    for (let i = 0; i < tones.length; i++) tones[i] = prng();
+    for (let y = 0; y < R; y++) {
+      const course = Math.floor(y / CH), fy = (y % CH) / CH;
+      const off = (course & 1) ? TW / 2 : 0;
+      for (let x = 0; x < R; x++) {
+        const fx = (((x + off) % TW) + TW) % TW / TW;
+        const tile = Math.floor((x + off) / TW);
+        const s = 0.5 + 0.5 * Math.sin(fx * Math.PI * 2 - Math.PI / 2);   // the S: crown at fx=0.5
+        // lap: each course sits on the one below, so height falls down the course
+        const lap = 0.85 - fy * 0.5 + (fy < 0.1 ? -0.3 : 0);
+        const i = y * R + x;
+        height[i] = s * 0.55 + lap * 0.45 + (grain[i] - 0.5) * 0.06;
+        tileTone[i] = tones[((course & 63) * 64) + (tile & 63)];
       }
     }
-  }, { repeat: [2, 2] });
-
-  T.roofSlate = canvasTexture([256, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#4a5058', 0.08, 2500);
-    for (let y = 0; y < h; y += 14) {
-      ctx.fillStyle = 'rgba(180,196,214,0.10)'; ctx.fillRect(0, y + 2, w, 3);
-      ctx.strokeStyle = 'rgba(15,18,22,0.5)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    const roofC = _canvas([R, R]);
+    const rctx = roofC.getContext('2d');
+    const img = rctx.createImageData(R, R);
+    const d = img.data;
+    for (let i = 0; i < R * R; i++) {
+      const y = Math.floor(i / R);
+      const fy = (y % CH) / CH;
+      const tn = tileTone[i], h = height[i];
+      let r = 160 + tn * 40, g = 84 + tn * 26, b = 60 + tn * 16;
+      const l = 0.7 + h * 0.5 - (fy < 0.12 ? 0.25 : 0);     // shadow line under each lap
+      r *= l; g *= l; b *= l;
+      const w = Math.pow(weath[i], 2) * 0.5;                  // moss / weathering, greyer
+      r = _mix(r, 96, w); g = _mix(g, 104, w); b = _mix(b, 78, w);
+      d[i * 4] = r; d[i * 4 + 1] = g; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
     }
-  }, { repeat: [2, 2] });
-  {
-    const f = normalizeField(fbmField(256, 16, 3, 111, { gain: 0.5 }));
-    T.roofN = normalMapFromField(f, 256, 1.6, [2, 2]);
+    rctx.putImageData(img, 0, 0);
+    T.roof = _makeTexture(roofC, { repeat: [2, 2] });
+    T.roofN = normalMapFromField(height, R, 2.6, [2, 2]);
+    T.roofR = grayMapFromField(weath, R, 0.7, 0.95, [2, 2]);
+
+    // slate
+    const SH = 14, SW = 22;
+    const sh = new Float32Array(R * R);
+    const stone = new Float32Array(R * R);
+    for (let y = 0; y < R; y++) {
+      const course = Math.floor(y / SH), fy = y % SH;
+      const off = (course & 1) ? SW / 2 : 0;
+      for (let x = 0; x < R; x++) {
+        const fx = (((x + off) % SW) + SW) % SW;
+        const slate = Math.floor((x + off) / SW);
+        const tn = tones[((course * 7 + 3) & 63) * 64 + ((slate * 5 + 1) & 63)];
+        const i = y * R + x;
+        const edge = fx < 1.5 || fy < 1.5;
+        sh[i] = edge ? 0.3 : 0.6 + tn * 0.12 - fy / SH * 0.2 + (grain[i] - 0.5) * 0.05;
+        stone[i] = edge ? -1 : tn;
+      }
+    }
+    const slateC = _canvas([R, R]);
+    const sctx = slateC.getContext('2d');
+    const simg = sctx.createImageData(R, R);
+    const sd = simg.data;
+    for (let i = 0; i < R * R; i++) {
+      const tn = stone[i];
+      let r, g, b;
+      if (tn < 0) { r = 22; g = 24; b = 28; }
+      else {
+        const l = 0.75 + tn * 0.5 + (sh[i] - 0.6) * 0.6;
+        // blue-grey slate with the odd purple or green stone
+        const hueShift = tn > 0.9 ? [1.08, 0.94, 1.1] : tn < 0.1 ? [0.92, 1.04, 0.95] : [1, 1, 1];
+        r = 74 * l * hueShift[0]; g = 80 * l * hueShift[1]; b = 90 * l * hueShift[2];
+      }
+      sd[i * 4] = r; sd[i * 4 + 1] = g; sd[i * 4 + 2] = b; sd[i * 4 + 3] = 255;
+    }
+    sctx.putImageData(simg, 0, 0);
+    T.roofSlate = _makeTexture(slateC, { repeat: [2, 2] });
+    T.roofSlateN = normalMapFromField(sh, R, 2.2, [2, 2]);
+    T.roofSlateR = grayMapFromField(grain, R, 0.45, 0.7, [2, 2]);
   }
 
-  T.bark = canvasTexture([128, 256], (ctx, w, h) => {
-    noiseFill(ctx, w, h, rng, '#5c4632', 0.12, 2200);
-    ctx.strokeStyle = 'rgba(25,16,8,0.45)';
-    for (let i = 0; i < 40; i++) {
-      const x = rng() * w;
-      ctx.lineWidth = 1 + rng() * 2;
-      ctx.beginPath(); ctx.moveTo(x, 0);
-      ctx.bezierCurveTo(x + 8, h * 0.3, x - 8, h * 0.6, x + 4, h); ctx.stroke();
+  // ════════════════════ Bark ════════════════════
+  // Ridged noise stretched along the trunk gives real furrows; the normal map
+  // from the same field is what makes a tree trunk stop looking like a tube.
+  {
+    const B = 256;
+    const furrow = normalizeField(fbmField(B, 10, 4, 141, { gain: 0.55, ridged: true, aspect: 0.22 }));
+    const flake  = normalizeField(fbmField(B, 30, 2, 142, { gain: 0.5, aspect: 0.5 }));
+    T.bark = albedoFromField(furrow, B, (v, f) => {
+      const t = v * 0.7 + f * 0.3;
+      const deep = Math.pow(1 - v, 2);            // dark in the cracks
+      return [_mix(38, 118, t) - deep * 8, _mix(28, 92, t) - deep * 8, _mix(20, 66, t) - deep * 6];
+    }, [1, 2], flake);
+    {   // moss on the north side: a green cast over one band of the trunk
+      const ctx = T.bark.image.getContext('2d');
+      const g = ctx.createLinearGradient(0, 0, B, 0);
+      g.addColorStop(0, 'rgba(70,110,40,0)'); g.addColorStop(0.25, 'rgba(70,110,40,0.35)');
+      g.addColorStop(0.5, 'rgba(70,110,40,0)');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, B, B);
+      T.bark.needsUpdate = true;
     }
-  }, { repeat: [1, 1] });
+    const bump = new Float32Array(B * B);
+    for (let i = 0; i < bump.length; i++) bump[i] = furrow[i] * 0.85 + flake[i] * 0.15;
+    T.barkN = normalMapFromField(bump, B, 3.4, [1, 2]);
+  }
+
+  // ════════════════════ Painted steel / industrial panels ════════════════════
+  // For the engineering set-pieces: a panelled, riveted, scuffed painted-steel
+  // skin, a hazard-striped variant, and a floor grating. All three share one
+  // relief so seams, rivets and scratches show in the normal map.
+  {
+    const M = 512;
+    const scuff = normalizeField(fbmField(M, 6, 4, 151, { gain: 0.55 }));
+    const micro = normalizeField(fbmField(M, 80, 2, 152, { gain: 0.5 }));
+    const rustF = normalizeField(fbmField(M, 5, 4, 153, { gain: 0.6, warp: 30 }));
+    const height = new Float32Array(M * M).fill(0.5);
+    const seamMask = new Uint8Array(M * M);
+    const PANEL = 128;
+    for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
+      const i = y * M + x;
+      const sx = x % PANEL, sy = y % PANEL;
+      const dEdge = Math.min(sx, PANEL - 1 - sx, sy, PANEL - 1 - sy);
+      if (dEdge < 2) { height[i] = 0.30; seamMask[i] = 1; }
+      else if (dEdge < 5) height[i] = 0.42 + (dEdge - 2) * 0.03;
+      else height[i] = 0.5 + (micro[i] - 0.5) * 0.02;
+      // rivets: a row 8 px inside every seam, one every 32 px
+      const inX = sx < 16 ? 8 : sx >= PANEL - 16 ? PANEL - 9 : -1;
+      const inY = sy < 16 ? 8 : sy >= PANEL - 16 ? PANEL - 9 : -1;
+      let rr = 99;
+      if (inX >= 0) rr = Math.min(rr, Math.hypot(sx - inX, ((sy + 16) % 32) - 16));
+      if (inY >= 0) rr = Math.min(rr, Math.hypot(((sx + 16) % 32) - 16, sy - inY));
+      if (rr < 3.2) { height[i] = 0.5 + Math.sqrt(Math.max(0, 1 - (rr / 3.2) ** 2)) * 0.18; seamMask[i] = 2; }
+    }
+    // scratches: thin bright grooves
+    const prng = mulberry32(9090);
+    const scratches = [];
+    for (let s = 0; s < 70; s++) scratches.push([prng() * M, prng() * M, prng() * Math.PI * 2, 20 + prng() * 120]);
+    const scratchMask = new Float32Array(M * M);
+    for (const [x0, y0, ang, len] of scratches) {
+      const dx = Math.cos(ang), dy = Math.sin(ang);
+      for (let t = 0; t < len; t += 0.5) {
+        const x = Math.round(x0 + dx * t), y = Math.round(y0 + dy * t);
+        const i = (((y % M) + M) % M) * M + (((x % M) + M) % M);
+        scratchMask[i] = 1; height[i] -= 0.05;
+      }
+    }
+    const paint = (r, g, b, stripes) => {
+      const c = _canvas([M, M]);
+      const ctx = c.getContext('2d');
+      const img = ctx.createImageData(M, M);
+      const d = img.data;
+      for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
+        const i = y * M + x;
+        let cr = r, cg = g, cb = b;
+        if (stripes) {
+          const band = Math.floor(((x + y) % 96) / 48);
+          if (band === 0) { cr = 226; cg = 178; cb = 40; } else { cr = 38; cg = 38; cb = 40; }
+        }
+        const l = 0.86 + scuff[i] * 0.22 + (micro[i] - 0.5) * 0.08;
+        cr *= l; cg *= l; cb *= l;
+        if (seamMask[i] === 1) { cr *= 0.45; cg *= 0.45; cb *= 0.45; }
+        if (seamMask[i] === 2) { const k = 0.92 + (height[i] - 0.5) * 1.4; cr = 150 * k; cg = 152 * k; cb = 156 * k; }
+        // rust blooms out of the seams and the low corners
+        const ru = Math.pow(rustF[i], 3.2) * (seamMask[i] === 1 ? 1.6 : 0.55 + 0.45 * (y / M));
+        const k = Math.min(1, ru);
+        cr = _mix(cr, 132, k); cg = _mix(cg, 66, k); cb = _mix(cb, 34, k);
+        if (scratchMask[i]) { cr = _mix(cr, 190, 0.7); cg = _mix(cg, 192, 0.7); cb = _mix(cb, 196, 0.7); }
+        d[i * 4] = cr; d[i * 4 + 1] = cg; d[i * 4 + 2] = cb; d[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      return _makeTexture(c, { repeat: [1, 1] });
+    };
+    T.metal = paint(118, 130, 142, false);      // industrial blue-grey
+    T.metalHazard = paint(0, 0, 0, true);
+    T.metalN = normalMapFromField(height, M, 3.0, [1, 1]);
+    const rough = new Float32Array(M * M);
+    for (let i = 0; i < rough.length; i++) rough[i] = 0.35 + scuff[i] * 0.3 + Math.pow(rustF[i], 3.2) * 0.5 + (scratchMask[i] ? -0.2 : 0);
+    T.metalR = grayMapFromField(rough, M, 0, 1, [1, 1]);
+
+    // open steel grating (alpha) for walkways and the relay floor
+    T.grate = canvasTexture([128, 128], (ctx, w, h) => {
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#6a7078';
+      for (let k = 0; k < w; k += 16) { ctx.fillRect(k, 0, 4, h); ctx.fillRect(0, k, 4, w); }
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      for (let k = 0; k < w; k += 16) { ctx.fillRect(k, 0, 1, h); ctx.fillRect(0, k, w, 1); }
+    }, { repeat: [4, 4] });
+  }
 
   T.crops = canvasTexture([256, 256], (ctx, w, h) => {
     noiseFill(ctx, w, h, rng, '#6b5a3a', 0.10, 2000);

@@ -9,10 +9,13 @@ floats. Walk, run, and drift the full 5.9 km circumference of the ring city to r
 five broken systems and stabilize the spin.
 
 Everything is procedural — no downloaded assets. Terrain, city, vegetation, textures,
-sky, and all audio are generated in code: the ground textures are multi-octave value
-noise with normal and roughness maps derived from the same fields, and the lighting
-uses a painted equirectangular environment run through PMREM for image-based
-specular. three.js r160 is vendored in `lib/`, so the game runs fully offline.
+sky, and all audio are generated in code. Every material is a full PBR set built
+from one height field: meadow with clover drifts and wildflowers, rock with moss,
+lichen and quartz veins, bevelled flagstone paving, stucco / clapboard / brick
+house walls with genuinely recessed windows, pantile and slate roofs whose courses
+catch the light, furrowed bark, and riveted, scuffed, rusting painted steel for the
+engineering set-pieces. The lighting uses a painted equirectangular environment run
+through PMREM for image-based specular. three.js r160 is vendored in `lib/`, so the game runs fully offline.
 
 **Every session generates a different ring.** The river's meander, the road and
 guideway that hang off it, the rolling hills, the mountain rim, where the waterfall
@@ -43,29 +46,59 @@ that depends on it.
 | Shift | Run |
 | Space | Jump |
 | E | Interact (valves, fuses, terminals, board/leave trains) |
+| Tab | Switch which repair the compass is tracking |
 | — | Platform boards show the live countdown to the next train in each direction |
 | **Zero-g** | WASD = thrusters (toward where you look), Space = climb, C = descend |
 | **In water** | wading slows you; past chest depth you swim, Space to rise |
 | Esc | Pause / release pointer |
 | G | Sandbox: trigger a gravity failure immediately |
 
+## Finding your way
+
+A **compass strip** under the status bar points at the tracked repair's *current
+step* — the next fuse cell, the second half of a code, the next beacon — with
+the distance and the height difference, and a diamond marker floats over the
+spot in the world. Tab cycles which repair you are following; the objective
+list (top left) and the minimap ring (bottom right, with the trains moving on
+it) mark all five. The status bar also counts down to the **next gravity
+fault**, and while you are weightless, to the spin coming back — worth watching
+before you commit to something 40 m up.
+
 ## The five repairs
 
-Marked as amber dots on the ring minimap (bottom right); the plaza status terminal
-gives hints. They deliberately drag you all the way around the ring:
+They deliberately drag you all the way around the ring, and each one is a
+different kind of problem:
 
-1. **Coolant valves** — Engineering Bay (48°). Watch the indicator lamps blink a
-   sequence, turn the four valves in that order.
+1. **Coolant loop** — Engineering Bay (48°). Four valves under a live pressure
+   board. Each valve feeds two gauges (its own and the next one along), every
+   valve has four positions, and the board shows where every needle sits
+   against its green band — so it is a coupled-balance puzzle you can read
+   your way through, not a memory test.
 2. **Power relay** — Agricultural Belt. Three glowing fuse cells sit under light
-   beacons; carry them to the relay cabinet at 104°.
-3. **Spoke phase alignment** — Gamma Terminal (180°). A timing minigame: hit the
-   moving marker inside the green window three times.
-4. **Observatory uplink** — the console at 272° wants a 4-digit code. Maintenance
-   stenciled it on the water-tower tank back in Reservoir Flats (250°).
-5. **Gyroscope calibration** — the panel sits 17 m up Spoke F (300°), reachable
-   only while gravity is out. Wait for a failure, then float up to it.
+   beacons; carry them to the relay cabinet at 104°. Seating them opens the
+   relay grid: rotate the pipe tiles (click, or arrows + Space) until power
+   crosses from the live bus to the far one. Every grid is scrambled from a
+   real solution, so it always goes.
+3. **Spoke phase lock** — Gamma Terminal (180°). An oscilloscope with the
+   spoke's own waveform on it. Tune frequency (W/S), phase (A/D) and later
+   amplitude (R/F) until your trace overlays it and hold the coherence above
+   the threshold; three stages, the last with a tighter window.
+4. **Observatory uplink** — the console at 272° wants a 4-digit code that
+   maintenance split in two: digits 1–2 are stenciled on the water-tower tank
+   in Reservoir Flats (250°), digits 3–4 on the pump station across the river.
+   The code only opens the dish: sweep azimuth and elevation for the carrier by
+   the tick rate and the signal bar, hold it to lock, then track it when it
+   drifts.
+5. **Gyroscope calibration** — Spoke F (300°). Three reference beacons hang up
+   the shaft at 11, 25 and 39 m. Wait for a failure, fly through them in order
+   while weightless, then true the panel at 17 m — all before the spin comes
+   back, or the course resets.
 
-Fix all five and the wheel stabilizes for good.
+Fix all five and the wheel stabilizes for good. The shift report at the end
+grades the run (S/A/B/C by time) and tallies distance walked, failures
+survived, time in free fall, train rides, and how many repairs went through
+without a reset. The faults themselves get more frequent the longer the shift
+runs, so the pressure climbs.
 
 ## How the world works
 

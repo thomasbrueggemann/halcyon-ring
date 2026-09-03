@@ -83,6 +83,39 @@ class AudioEngine {
     [392, 523, 659, 784, 1047, 1319].forEach((f, i) => this.tone(f, 0.6, 'sine', 0.11, i * 0.14));
   }
   hit() { this.tone(240, 0.06, 'square', 0.08); }
+  click() { this.tone(1600, 0.03, 'square', 0.03); this.tone(420, 0.04, 'triangle', 0.04); }
+  lock() { [660, 880, 1320].forEach((f, i) => this.tone(f, 0.22, 'sine', 0.09, i * 0.07)); }
+  beaconHit(n) { this.tone(520 + n * 140, 0.18, 'sine', 0.1); this.tone(1040 + n * 280, 0.3, 'sine', 0.06, 0.06); }
+  geiger(sig) {
+    if (!this.ctx) return;
+    this.tone(1800 + sig * 900, 0.018, 'square', 0.02 + sig * 0.03);
+  }
+  // valve wheel: a short metallic scrape plus a steam blip
+  valveTurn() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t0 = ctx.currentTime;
+    const src = ctx.createBufferSource(); src.buffer = this.noiseBuf;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 2.5;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.12, t0 + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.45);
+    src.connect(bp); bp.connect(g); g.connect(this.master);
+    src.start(t0, Math.random() * 1.2, 0.5);
+    this.tone(180, 0.12, 'triangle', 0.05, 0.02);
+  }
+  // landing thud: low filtered noise burst scaled by impact speed
+  thud(strength = 1) {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t0 = ctx.currentTime;
+    const src = ctx.createBufferSource(); src.buffer = this.noiseBuf;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(Math.min(0.5, 0.12 * strength), t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+    src.connect(lp); lp.connect(g); g.connect(this.master);
+    src.start(t0, Math.random() * 1.5, 0.2);
+  }
 
   gravityDownSweep() {
     if (!this.ctx) return;
