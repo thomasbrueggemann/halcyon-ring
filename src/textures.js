@@ -83,7 +83,7 @@ function normalizeField(f) {
   return f;
 }
 
-function _makeTexture(canvas, { repeat = [1, 1], srgb = true, aniso = 8 } = {}) {
+function _makeTexture(canvas, { repeat = [1, 1], srgb = true, aniso = 16 } = {}) {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeat[0], repeat[1]);
@@ -368,7 +368,7 @@ function makeTextures() {
       const stones = [];
       while (x < S + startX) { const w = 48 + Math.floor(prng() * 70); stones.push([x, Math.min(S + startX, x + w)]); x += w; }
       for (const [x0, x1] of stones) {
-        const tone = 0.78 + prng() * 0.34, hue = prng();
+        const tone = 0.86 + prng() * 0.2, hue = prng();
         tones.push([tone, hue]);
         for (let yy = y0; yy < y1; yy++) {
           for (let xx = x0; xx < x1; xx++) {
@@ -392,8 +392,8 @@ function makeTextures() {
       const [tone, hue] = tones[sid];
       let g = _mix(118, 168, t) * tone;
       // sandstone → limestone → blue-grey: three quarry tones across the pavers
-      let r = g * (hue < 0.33 ? 1.06 : hue < 0.66 ? 1.0 : 0.94);
-      let bl = g * (hue < 0.33 ? 0.86 : hue < 0.66 ? 0.94 : 1.04);
+      let r = g * (hue < 0.33 ? 1.04 : hue < 0.66 ? 1.0 : 0.97);
+      let bl = g * (hue < 0.33 ? 0.88 : hue < 0.66 ? 0.93 : 0.99);
       // bevel: the rounded edge reads lighter on top
       const h = height[i];
       const k = 0.82 + 0.28 * h;
@@ -967,19 +967,169 @@ function makeTextures() {
     }
   });
 
-  // Leafy canopy alpha texture (soft blob clusters)
-  T.leaf = canvasTexture([128, 128], (ctx, w, h) => {
-    ctx.clearRect(0, 0, w, h);
-    for (let i = 0; i < 90; i++) {
-      const x = w / 2 + (rng() - 0.5) * w * 0.85;
-      const y = h / 2 + (rng() - 0.5) * h * 0.85;
-      const d = Math.hypot(x - w / 2, y - h / 2) / (w / 2);
-      if (d > 0.95) continue;
-      const g = 80 + rng() * 90;
-      ctx.fillStyle = `rgba(${g * 0.42},${g},${g * 0.30},${0.75 - d * 0.4})`;
-      ctx.beginPath(); ctx.arc(x, y, 4 + rng() * 9, 0, 7); ctx.fill();
+  // ════════════════════ Foliage cards ════════════════════
+  // Canopies are spheres wrapped in an alpha-cut texture, so the texture is
+  // what reads as "leaves". 512² of individual, overlapping leaf shapes —
+  // each with a midrib, its own shade, and a fold across its width that the
+  // normal map picks up — tiled seamlessly (every leaf near an edge is drawn
+  // again on the far side). Colour stays near-neutral green: the per-tree
+  // instance tint supplies the hue. Needles get the same treatment as twigs.
+  function foliage(size, count, seed, drawOne, clusters = 0, clump = false) {
+    const frng = mulberry32(seed);
+    // Leaves grow on twigs, in clumps with sky between them. Placing them
+    // around cluster centres (rather than uniformly) is what leaves the holes
+    // a crown needs to stop reading as a clipped hedge.
+    const cl = [];
+    for (let i = 0; i < clusters; i++) cl.push([frng() * size, frng() * size, size * (0.035 + frng() * 0.05)]);
+    const col = _canvas([size, size]), hgt = _canvas([size, size]);
+    const cc = col.getContext('2d'), hc = hgt.getContext('2d');
+    cc.clearRect(0, 0, size, size);
+    hc.fillStyle = '#000'; hc.fillRect(0, 0, size, size);
+    for (let i = 0; i < count; i++) {
+      let x = frng() * size, y = frng() * size;
+      if (cl.length && frng() < 0.9) {
+        const c = cl[Math.floor(frng() * cl.length)];
+        const a = frng() * Math.PI * 2, r = c[2] * Math.sqrt(frng());
+        x = (c[0] + Math.cos(a) * r + size) % size; y = (c[1] + Math.sin(a) * r + size) % size;
+      }
+      let rot = frng() * Math.PI * 2;
+      if (clump) {
+        // one round clump of leaves on a card: dense core, ragged rim,
+        // leaves pointing out from the twig they hang off
+        const a = frng() * Math.PI * 2, r = size * 0.42 * Math.pow(frng(), 0.65);
+        x = size / 2 + Math.cos(a) * r; y = size / 2 + Math.sin(a) * r;
+        rot = a + (frng() - 0.5) * 1.6;
+      }
+      const layer = i / count;
+      const params = drawOne.params(frng, layer);
+      const R = params.reach;
+      const wraps = clump ? [0] : [-size, 0, size];
+      for (const ox of wraps) {
+        for (const oy of wraps) {
+          const px = x + ox, py = y + oy;
+          if (px < -R || px > size + R || py < -R || py > size + R) continue;
+          cc.setTransform(Math.cos(rot), Math.sin(rot), -Math.sin(rot), Math.cos(rot), px, py);
+          hc.setTransform(Math.cos(rot), Math.sin(rot), -Math.sin(rot), Math.cos(rot), px, py);
+          drawOne.draw(cc, hc, params, layer);
+        }
+      }
     }
-  });
+    cc.setTransform(1, 0, 0, 1, 0, 0); hc.setTransform(1, 0, 0, 1, 0, 0);
+    const hd = hc.getImageData(0, 0, size, size).data;
+    const field = new Float32Array(size * size);
+    for (let i = 0; i < field.length; i++) field[i] = hd[i * 4] / 255;
+    return { map: _bledTexture(cc, size), normal: normalMapFromField(field, size, 2.2, [1, 1]) };
+  }
+  // Canvas stores premultiplied alpha, so every transparent texel uploads as
+  // black — and filtering then drags a dark rim round every leaf. Rebuild the
+  // map as a DataTexture whose transparent texels carry the colour of the
+  // nearest leaf (a few dilation passes, then the mean for whatever is left).
+  function _bledTexture(ctx, size) {
+    const src = ctx.getImageData(0, 0, size, size).data;
+    const out = new Uint8Array(src.length);
+    out.set(src);
+    let mr = 0, mg = 0, mb = 0, n = 0;
+    for (let i = 0; i < src.length; i += 4) if (src[i + 3] > 200) { mr += src[i]; mg += src[i + 1]; mb += src[i + 2]; n++; }
+    mr /= Math.max(1, n); mg /= Math.max(1, n); mb /= Math.max(1, n);
+    let known = new Uint8Array(size * size);
+    for (let i = 0; i < known.length; i++) known[i] = src[i * 4 + 3] > 8 ? 1 : 0;
+    for (let pass = 0; pass < 6; pass++) {
+      const next = known.slice();
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = y * size + x;
+          if (known[i]) continue;
+          let r = 0, g = 0, b = 0, c = 0;
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const j = ((y + dy + size) % size) * size + ((x + dx + size) % size);
+            if (known[j]) { r += out[j * 4]; g += out[j * 4 + 1]; b += out[j * 4 + 2]; c++; }
+          }
+          if (c) { out[i * 4] = r / c; out[i * 4 + 1] = g / c; out[i * 4 + 2] = b / c; next[i] = 1; }
+        }
+      }
+      known = next;
+    }
+    for (let i = 0; i < known.length; i++) if (!known[i]) { out[i * 4] = mr; out[i * 4 + 1] = mg; out[i * 4 + 2] = mb; }
+    // rows reversed: matches the flipY upload of the canvas-built normal map
+    const flipped = new Uint8Array(out.length), row = size * 4;
+    for (let y = 0; y < size; y++) flipped.set(out.subarray(y * row, (y + 1) * row), (size - 1 - y) * row);
+    const tex = new THREE.DataTexture(flipped, size, size, THREE.RGBAFormat);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.magFilter = THREE.LinearFilter; tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.generateMipmaps = true; tex.anisotropy = 16;
+    tex.needsUpdate = true;
+    return tex;
+  }
+  const leafPath = (ctx, L, W) => {
+    ctx.beginPath(); ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(L * 0.25, -W, L * 0.7, -W * 0.9, L, 0);
+    ctx.bezierCurveTo(L * 0.7, W * 0.9, L * 0.25, W, 0, 0);
+    ctx.closePath();
+  };
+  {
+    const leafDrawer = {
+      params(r, layer) {
+        const L = 13 + r() * 13, W = L * (0.26 + r() * 0.1);
+        // deeper leaves darker; the outer shell catches light; a few turning
+        const g = (0.42 + 0.58 * layer) * (0.8 + r() * 0.3);
+        const yel = r() < 0.07 ? 0.5 + r() * 0.5 : 0;
+        return { L, W, reach: L + 2, g, yel, rib: r() < 0.8 };
+      },
+      draw(cc, hc, p, layer) {
+        const base = 210 * p.g;
+        cc.fillStyle = `rgb(${Math.round(base * (0.5 + 0.35 * p.yel))},${Math.round(base)},${Math.round(base * (0.36 - 0.12 * p.yel))})`;
+        leafPath(cc, p.L, p.W); cc.fill();
+        // darker petiole end, lighter tip — leaves are never flat colour
+        const gr = cc.createLinearGradient(0, 0, p.L, 0);
+        gr.addColorStop(0, 'rgba(20,30,10,0.35)'); gr.addColorStop(0.5, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(255,255,220,0.12)');
+        cc.fillStyle = gr; leafPath(cc, p.L, p.W); cc.fill();
+        if (p.rib) {
+          cc.strokeStyle = `rgba(230,240,190,${0.22 + 0.2 * layer})`; cc.lineWidth = 0.9;
+          cc.beginPath(); cc.moveTo(1, 0); cc.lineTo(p.L * 0.92, 0); cc.stroke();
+        }
+        // height: raised midrib fold, rising with layer
+        const hg = hc.createLinearGradient(0, -p.W, 0, p.W);
+        const top = Math.round(60 + 190 * layer), edge = Math.round(20 + 150 * layer);
+        hg.addColorStop(0, `rgb(${edge},${edge},${edge})`);
+        hg.addColorStop(0.5, `rgb(${top},${top},${top})`);
+        hg.addColorStop(1, `rgb(${edge},${edge},${edge})`);
+        hc.fillStyle = hg; leafPath(hc, p.L, p.W); hc.fill();
+      },
+    };
+    const F = foliage(512, 1250, 971, leafDrawer, 34);
+    T.leaf = F.map; T.leafN = F.normal;
+    const C = foliage(512, 900, 973, leafDrawer, 0, true);
+    C.map.wrapS = C.map.wrapT = THREE.ClampToEdgeWrapping;
+    C.normal.wrapS = C.normal.wrapT = THREE.ClampToEdgeWrapping;
+    T.leafCard = C.map; T.leafCardN = C.normal;
+  }
+  {
+    const F = foliage(512, 520, 972, {
+      params(r, layer) {
+        const L = 26 + r() * 22;
+        return { L, reach: L + 8, g: (0.45 + 0.55 * layer) * (0.8 + r() * 0.3), n: 10 + Math.floor(r() * 8), bend: (r() - 0.5) * 0.3 };
+      },
+      draw(cc, hc, p, layer) {
+        const base = 190 * p.g;
+        const cs = `rgb(${Math.round(base * 0.45)},${Math.round(base)},${Math.round(base * 0.55)})`;
+        const hv = Math.round(40 + 200 * layer);
+        for (const [ctx, style] of [[cc, cs], [hc, `rgb(${hv},${hv},${hv})`]]) {
+          ctx.strokeStyle = style; ctx.lineCap = 'round';
+          ctx.lineWidth = 1.6;
+          ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(p.L * 0.5, p.bend * p.L, p.L, 0); ctx.stroke();
+          ctx.lineWidth = 1.3;
+          for (let k = 1; k <= p.n; k++) {
+            const t = k / (p.n + 1), x = p.L * t, len = 7 * (1 - t * 0.5);
+            for (const sgn of [-1, 1]) {
+              ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + len * 0.55, sgn * len); ctx.stroke();
+            }
+          }
+        }
+      },
+    }, 26);
+    T.needle = F.map; T.needleN = F.normal;
+  }
 
   return T;
 }

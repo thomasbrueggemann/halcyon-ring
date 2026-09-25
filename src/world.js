@@ -344,8 +344,12 @@ function buildWorld(scene, textures, colliders) {
   // shading are all derived from it rather than re-querying terrainH (which
   // would otherwise cost ~450k extra evaluations at load).
   const TSEG = 1600, TNP = 80;   // 190 m across the tube ≈ 2.4 m per lat step
+  // Kept after the build: grass.js reads the meadow weight (splat .x) so the
+  // blade field thins onto scree and beaches exactly where the texture does.
+  let splatGrid = null, heightGrid = null;
   {
     const H = new Float32Array((TSEG + 1) * TNP);
+    heightGrid = H;
     const latOf = (i) => -FLOOR_LAT + (2 * FLOOR_LAT) * (i / (TNP - 1));
     const dLat = (2 * FLOOR_LAT) / (TNP - 1);
     const dArc = CIRCUMFERENCE / TSEG;
@@ -360,6 +364,7 @@ function buildWorld(scene, textures, colliders) {
     const colors = new Float32Array((TSEG + 1) * TNP * 3);
     const splat = new Float32Array((TSEG + 1) * TNP * 3);
     const cliff = new Float32Array((TSEG + 1) * TNP * 3);
+    splatGrid = new Float32Array(TSEG * TNP);
     const p = new THREE.Vector3();
 
     for (let s = 0; s <= TSEG; s++) {
@@ -420,6 +425,7 @@ function buildWorld(scene, textures, colliders) {
         rock *= 1 - sand;
         const grass = Math.max(0, 1 - rock - sand);
         splat[k * 3] = grass; splat[k * 3 + 1] = rock; splat[k * 3 + 2] = sand;
+        if (s < TSEG) splatGrid[s * TNP + i] = grass * (1 - _sstep(0.0, 0.25, snow));
 
         // elevation-mapped UV for the rock layer, plus how far to trust it
         cliff[k * 3] = theta * RF;
@@ -1380,8 +1386,34 @@ function buildWorld(scene, textures, colliders) {
     world.add(clouds);
   }
 
+  // bilinear meadow weight at (theta, lat), 0 outside the floor
+  function meadowAt(theta, lat) {
+    const fs = ((((theta / (Math.PI * 2)) % 1) + 1) % 1) * TSEG;
+    const fi = (lat + FLOOR_LAT) / (2 * FLOOR_LAT) * (TNP - 1);
+    if (fi < 0 || fi > TNP - 1) return 0;
+    const s0 = Math.floor(fs), i0 = Math.min(TNP - 2, Math.floor(fi));
+    const ts = fs - s0, ti = fi - i0;
+    const s1 = (s0 + 1) % TSEG;
+    const a = splatGrid[s0 * TNP + i0], b = splatGrid[s1 * TNP + i0];
+    const c = splatGrid[s0 * TNP + i0 + 1], d = splatGrid[s1 * TNP + i0 + 1];
+    return (a + (b - a) * ts) * (1 - ti) + (c + (d - c) * ts) * ti;
+  }
+
+  // bilinear height of the terrain MESH (its own grid), not the analytic
+  // terrainH — things that must sit on the drawn surface (grass) use this
+  function gridH(theta, lat) {
+    const fs = ((((theta / (Math.PI * 2)) % 1) + 1) % 1) * TSEG;
+    const fi = Math.max(0, Math.min(TNP - 1.0001, (lat + FLOOR_LAT) / (2 * FLOOR_LAT) * (TNP - 1)));
+    const s0 = Math.floor(fs), i0 = Math.floor(fi);
+    const ts = fs - s0, ti = fi - i0;
+    const s1 = s0 + 1;   // H has TSEG + 1 rows (the seam row duplicated)
+    const a = heightGrid[s0 * TNP + i0], b = heightGrid[s1 * TNP + i0];
+    const c = heightGrid[s0 * TNP + i0 + 1], d = heightGrid[s1 * TNP + i0 + 1];
+    return (a + (b - a) * ts) * (1 - ti) + (c + (d - c) * ts) * ti;
+  }
+
   return {
-    group: world, sweepProfile, tubeArc, waterMat, cascadeMat,
+    group: world, sweepProfile, tubeArc, waterMat, cascadeMat, meadowAt, gridH,
     update(t, dt) {
       waterMat.userData.uniforms.uTime.value = t;
       cascadeMat.userData.uniforms.uTime.value = t;

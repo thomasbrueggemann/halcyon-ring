@@ -52,6 +52,20 @@ function placementMatrix(theta, lat, h, yaw = 0, scale = 1, target = new THREE.M
   return target.compose(_p, _tmQ, _s);
 }
 
+// three's ConeGeometry leaves the seam copy of its apex with a zero-length
+// normal; the shader normalises that to NaN, and post-processing bloom turns
+// the resulting NaN pixels into blinking lights. Point any such normal up.
+function fixZeroNormals(geo) {
+  const n = geo.attributes.normal;
+  if (!n) return geo;
+  for (let i = 0; i < n.count; i++) {
+    const x = n.getX(i), y = n.getY(i), z = n.getZ(i);
+    if (!(x * x + y * y + z * z > 1e-8)) n.setXYZ(i, 0, 1, 0);
+  }
+  n.needsUpdate = true;
+  return geo;
+}
+
 // Recover (theta, lat, h) from a world position.
 function worldToTorus(pos, target = {}) {
   const rc = Math.hypot(pos.x, pos.z);

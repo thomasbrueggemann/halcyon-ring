@@ -24,11 +24,12 @@ const _nScl  = new THREE.Vector3();
 const _nMat  = new THREE.Matrix4();
 const _nCol  = new THREE.Color();
 const _nT    = {};
+const _nCam  = new THREE.Vector3();
 const _NAX_X = new THREE.Vector3(1, 0, 0);
 const _NAX_Y = new THREE.Vector3(0, 1, 0);
 const _NAX_Z = new THREE.Vector3(0, 0, 1);
 
-const NPC_BODY_HALF = 0.5;      // human body half-height (feet→center)
+const NPC_BODY_HALF = HUMAN_HALF; // human feet → mass centre (figures.js)
 const NPC_DUCK_H    = WATER_H;  // river water surface height (config.js)
 const NPC_KICK_G    = 0.5;      // gravityScale falling-edge that triggers tumble
 
@@ -51,45 +52,36 @@ function buildNPCs(scene, rng) {
   const nrng = mulberry32((WORLD_SEED ^ 0x0b1efab1) >>> 0);
 
   // ── palettes ──────────────────────────────────────────────────────────────
-  const CLOTHES = [
-    0x9c5a4a, 0xc98b3a, 0x6f8f5a, 0x4a6f8a, 0x7a5c86, 0xb5654f,
-    0x3f6d6a, 0xcaa15b, 0x8a4a5a, 0x556b8d, 0x6b7a4f, 0xa9553f,
-    0xd0c3a0, 0x40556b, 0x8c6d3f, 0x5f7d6e,
+  // Tops run the range of what people actually wear — lots of navy, grey,
+  // white and denim, a few saturated pieces — so a crowd reads as a crowd and
+  // not as a box of crayons.
+  const TOPS = [
+    0xe9e6df, 0xf4f1ea, 0x2b3448, 0x1f2a3d, 0x6b7078, 0x3d4148, 0x8a8f96,
+    0x9c3b35, 0x2f5d7c, 0x4c6b4a, 0xc9a24a, 0x7d4a6b, 0xd98f6e, 0x5e7fa6,
+    0x1c1c1e, 0xa8b6c4, 0xb7472a, 0x3f7f78, 0xe3c9a0, 0x6d4c3d,
   ];
-  const SKIN = [0xf1c9a5, 0xe0aa7c, 0xc98a5e, 0x9a6a44, 0x7a4e30, 0xf6d5b8];
-  const DOGCOL = [0x6b4a30, 0x3a2a20, 0xd8c39a, 0x9a6a3a, 0x2a2a2a, 0xe8ddc8];
+  const BOTTOMS = [
+    0x2c3a52, 0x34465f, 0x46597a, 0x1e1f24, 0x2a2b30, 0x5a5146, 0x8a7a5e,
+    0xb3a58a, 0x4a4f57, 0x3a3228, 0x6b2f34, 0x7a8a9a,
+  ];
+  const SKIN = [0xf3d2bb, 0xeac0a0, 0xdca883, 0xc98f67, 0xb07650, 0x8d5a3b, 0x6b4129, 0x4f2f1e, 0xf6dcc8, 0xd9a47c];
+  const HAIR = [0x1a1512, 0x2a1d15, 0x3b2a1e, 0x4e3524, 0x6b4a2e, 0x8a6a45, 0xb89466, 0xd2b483, 0x8e3a1e, 0x9a958f, 0xcfcac2, 0x121010];
+  const DOGCOL = [0x6b4a30, 0x3a2a20, 0xd8c39a, 0x9a6a3a, 0x2a2a2a, 0xe8ddc8, 0xb88a4e];
   const CATCOL = [0x6b6b6b, 0xc9772f, 0x222222, 0xd8d0c0, 0x4a4a4a, 0x9a8a6a];
-  const DUCKCOL = [0x6b5433, 0x8a6b3a, 0xe8e2d5, 0x4a3d28, 0x3a5a3a];
+  const DUCKCOL = [0x6b5433, 0x8a6b3a, 0xe8e2d5, 0x4a3d28, 0x7a6a55];
+  const DUCKHEAD = [0x1f4d2b, 0x5a4630, 0x6b5433, 0x1a3d2a, 0xe8e2d5];
   const BIRDCOL = [0x8a97a2, 0x6b7580, 0x2a2f34, 0xa8b2ba];
 
   const pick = (arr) => arr[(nrng() * arr.length) | 0];
 
-  // ── geometry (all centered at the agent's mass center) ──────────────────────
-  const bodyGeo = new THREE.CylinderGeometry(0.15, 0.27, 1.0, 7);
-  const headGeo = new THREE.SphereGeometry(0.16, 10, 8); headGeo.translate(0, 0.62, 0);
-
-  // quadruped: horizontal capsule body + head sphere, merged.
-  const qBody = new THREE.CapsuleGeometry(0.11, 0.30, 4, 8); qBody.rotateX(Math.PI / 2); qBody.translate(0, 0.02, 0);
-  const qHead = new THREE.SphereGeometry(0.11, 8, 6); qHead.translate(0, 0.14, 0.28);
-  const quadGeo = mergeGeometries([qBody, qHead]);
-
-  // duck: squashed body + tiny head.
-  const dBody = new THREE.SphereGeometry(0.13, 8, 6); dBody.scale(1.25, 0.85, 1.15);
-  const dHead = new THREE.SphereGeometry(0.075, 6, 5); dHead.translate(0, 0.11, 0.15);
-  const duckGeo = mergeGeometries([dBody, dHead]);
-
-  // bird: slim body + two swept wings.
-  const bBody = new THREE.CapsuleGeometry(0.06, 0.34, 3, 6); bBody.rotateX(Math.PI / 2);
-  const bWingL = new THREE.BoxGeometry(0.5, 0.02, 0.16); bWingL.translate(-0.3, 0, -0.02);
-  const bWingR = new THREE.BoxGeometry(0.5, 0.02, 0.16); bWingR.translate(0.3, 0, -0.02);
-  const birdGeo = mergeGeometries([bBody, bWingL, bWingR]);
-
-  const stdMat = (o) => new THREE.MeshStandardMaterial(Object.assign({ roughness: 0.85, metalness: 0.0 }, o));
-  const bodyMat = stdMat({});
-  const headMat = stdMat({ roughness: 0.7 });
-  const quadMat = stdMat({});
-  const duckMat = stdMat({ roughness: 0.6 });
-  const birdMat = stdMat({ roughness: 0.7 });
+  // ── figures (figures.js): articulated meshes posed on the GPU ──────────────
+  const humanGeo = buildHumanGeometry();
+  const dogGeo = buildQuadGeometry('dog'), catGeo = buildQuadGeometry('cat');
+  const duckGeo = buildDuckGeometry(), birdGeo = buildBirdGeometry();
+  const humanRig = makeHumanMaterials();
+  const dogRig = makeQuadMaterials('dog'), catRig = makeQuadMaterials('cat');
+  const duckRig = makeDuckMaterials(), birdRig = makeBirdMaterials();
+  const rigs = [humanRig, dogRig, catRig, duckRig, birdRig];
 
   // ── weighted spawn hotspots (theta in radians) ──────────────────────────────
   const HOTSPOTS = [
@@ -123,11 +115,20 @@ function buildNPCs(scene, rng) {
   const humans = [], quads = [], ducks = [], birds = [];
 
   function newHuman() {
-    const scale = (nrng() < 0.1) ? 0.6 : (0.85 + nrng() * 0.2);   // ~10% children
+    const child = nrng() < 0.1;                                    // ~10% children
+    const scale = child ? (0.56 + nrng() * 0.14) : (0.9 + nrng() * 0.17);
+    // style: hair (0 short 1 long 2 bun 3 bald), lower (0 trousers 1 shorts
+    // 2 skirt), flags (1 short sleeves, 2 chatter, 4 feminine build)
+    const fem = nrng() < 0.5;
+    const hair = fem ? (nrng() < 0.55 ? 1 : nrng() < 0.6 ? 2 : 0) : (nrng() < 0.12 ? 3 : nrng() < 0.08 ? 1 : 0);
+    const lower = fem ? (nrng() < 0.4 ? 2 : nrng() < 0.2 ? 1 : 0) : (nrng() < 0.18 ? 1 : 0);
+    const flags = (nrng() < 0.45 ? 1 : 0) + (fem ? 4 : 0) + (child ? 8 : 0);
     const a = {
       kind: 'human', scale, half: NPC_BODY_HALF * scale,
       theta: 0, lat: 0, yaw: 0, gh: 0,
-      color: pick(CLOTHES), skin: pick(SKIN),
+      color: pick(TOPS), bottom: pick(BOTTOMS), skin: pick(SKIN),
+      hairCol: (hair !== 3 && nrng() < 0.18 && !child) ? pick(HAIR.slice(9)) : pick(HAIR.slice(0, 9)),
+      style: [nrng() * 100, hair, lower, flags],
       mode: 'idle', speed: 0.8 + nrng() * 0.9,
       lane: null, laneT: 0, laneDir: 1, laneLen: 1, side: (nrng() < 0.5 ? -1 : 1) * (0.3 + nrng() * 1.4),
       roadDir: nrng() < 0.5 ? 1 : -1,
@@ -176,7 +177,7 @@ function buildNPCs(scene, rng) {
       const we = waterEdges(th);
       const lat = (we.dry ? riverLat(th) : we.lo) - (1.0 + nrng() * 1.5);
       asIdle(a, th, lat); a.sit = true; a.state = 'sit';
-      a.baseYaw = -Math.PI / 2;   // face toward the water (−lat)
+      a.baseYaw = Math.PI / 2;    // face the water (+lat of the spot)
     }
   }
 
@@ -187,6 +188,7 @@ function buildNPCs(scene, rng) {
     const off = 0.55;
     asIdle(a, th - off / RF, baseLat - 0.25); asIdle(b, th + off / RF, baseLat + 0.25);
     a.state = b.state = 'chat';
+    a.style[3] |= 2; b.style[3] |= 2;
     const darc = arcDelta(a.theta, b.theta), dl = b.lat - a.lat;
     a.baseYaw = Math.atan2(dl, darc); b.baseYaw = Math.atan2(-dl, -darc);
   }
@@ -194,11 +196,12 @@ function buildNPCs(scene, rng) {
   // ── animals ──────────────────────────────────────────────────────────────
   function newQuad(sub) {
     const isCat = sub === 'cat';
-    const scale = isCat ? (0.55 + nrng() * 0.15) : (0.9 + nrng() * 0.3);
+    const scale = isCat ? (0.9 + nrng() * 0.2) : (0.8 + nrng() * 0.4);
     const a = {
-      kind: sub, scale, half: 0.24 * scale,
+      kind: sub, scale, half: QUAD_PIV[sub].half * scale,
       theta: 0, lat: 0, yaw: 0, gh: 0,
       color: isCat ? pick(CATCOL) : pick(DOGCOL),
+      sitK: 0, pth: 0, plat: 0,
       state: 'trot', phase: nrng() * 6.28, speed: isCat ? 0.6 : 1.3,
       host: null, orbit: nrng() * 6.28, zoom: 0, zoomT: 2 + nrng() * 6,
       anchorTheta: 0, anchorLat: 0, dart: 0,
@@ -208,16 +211,17 @@ function buildNPCs(scene, rng) {
     };
     agents.push(a); quads.push(a); return a;
   }
+  const dogs = [], cats = [];
   // dogs — one per some human lane/road walker
   const walkerHumans = humans.filter(h => h.mode === 'lane' || h.mode === 'road');
   for (let i = 0; i < 14; i++) {
-    const d = newQuad('dog');
+    const d = newQuad('dog'); dogs.push(d);
     d.host = walkerHumans[(nrng() * walkerHumans.length) | 0] || humans[0];
     d.theta = d.host.theta; d.lat = d.host.lat + 0.9;
   }
   // cats — perch near random lane endpoints
   for (let i = 0; i < 12; i++) {
-    const c = newQuad('cat');
+    const c = newQuad('cat'); cats.push(c);
     const li = (nrng() * LANES.length) | 0; const s = laneSample(LANES[li], 0.15 + nrng() * 0.7);
     c.state = 'perch'; c.anchorTheta = s.theta; c.anchorLat = s.lat + (nrng() - 0.5) * 2;
     c.theta = c.anchorTheta; c.lat = c.anchorLat; c.yaw = nrng() * 6.28;
@@ -226,9 +230,9 @@ function buildNPCs(scene, rng) {
   // ducks — float the river, clustered on the lake at θ≈240°
   function newDuck(theta) {
     const a = {
-      kind: 'duck', scale: 0.9 + nrng() * 0.3, half: 0.10,
+      kind: 'duck', scale: 0.9 + nrng() * 0.3, half: DUCK_HALF,
       theta, lat: waterEdges(theta).center ?? riverLat(theta),
-      yaw: nrng() * 6.28, gh: NPC_DUCK_H, color: pick(DUCKCOL),
+      yaw: nrng() * 6.28, gh: NPC_DUCK_H, color: pick(DUCKCOL), head: pick(DUCKHEAD),
       state: 'float', phase: nrng() * 6.28, driftDir: nrng() < 0.5 ? 1 : -1, speed: 0.15 + nrng() * 0.15,
       colHits: 0,
       airborne: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(),
@@ -246,7 +250,7 @@ function buildNPCs(scene, rng) {
       theta, birdSpeed: (sub === 'heron' ? 0.05 : 0.11) * (nrng() < 0.5 ? 1 : -1),
       latC, latAmp: 8 + nrng() * 14, latF: 0.05 + nrng() * 0.05, latPh: nrng() * 6.28,
       hBase, hAmp: 3 + nrng() * 5, hF: 0.07 + nrng() * 0.06, hPh: nrng() * 6.28,
-      color: sub === 'heron' ? BIRDCOL[0] : pick(BIRDCOL), wingPh: nrng() * 6.28, wingF: sub === 'heron' ? 2 : 6,
+      color: sub === 'heron' ? BIRDCOL[0] : pick(BIRDCOL), wingPh: nrng() * 6.28, wingF: sub === 'heron' ? 3.2 : 13,
       airborne: false,
     };
     agents.push(a); birds.push(a); return a;
@@ -257,27 +261,76 @@ function buildNPCs(scene, rng) {
   for (let i = 0; i < 6; i++) newBird('swift', swiftBaseTh + (nrng() - 0.5) * 0.3, swiftLat + (nrng() - 0.5) * 10, swiftH + (nrng() - 0.5) * 8);
 
   // ── instanced meshes ─────────────────────────────────────────────────────
-  function makeInst(geo, mat, list, colorKey) {
-    const im = new THREE.InstancedMesh(geo, mat, list.length || 1);
-    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    im.castShadow = true; im.frustumCulled = false;
-    for (let i = 0; i < list.length; i++) {
-      list[i].inst = i;
-      im.setColorAt(i, _nCol.setHex(colorKey === 'skin' ? list[i].skin : list[i].color));
+  // Each species is one InstancedMesh. Per-instance attributes carry the
+  // colours (linear), style and the 4-float animation state the shader poses
+  // from. Agents write their matrix + anim into their own staging arrays;
+  // at the end of the frame only the ones near enough and inside the view are
+  // packed into the front of the GPU buffers (mesh.count), so a figure 3 km
+  // round the ring costs nothing — in the main pass or the shadow pass.
+  function makeInst(geo, rig, list, statics, cullR) {
+    const n = Math.max(1, list.length);
+    const g = geo.clone();
+    const st = [];
+    for (const [key, size, fn] of statics) {
+      const attr = new THREE.InstancedBufferAttribute(new Float32Array(n * size), size);
+      attr.setUsage(THREE.DynamicDrawUsage);
+      g.setAttribute(key, attr);
+      st.push({ attr, size, src: list.map(a => fn(a)) });
     }
-    if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    const anim = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+    anim.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('aAnim', anim);
+    const im = new THREE.InstancedMesh(g, rig.mat, n);
+    im.customDepthMaterial = rig.depth;
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false;
+    im.count = 0;
+    list.forEach((a, i) => { a.mtx = new Float32Array(16); a.animv = new Float32Array(4); a.slotIdx = i; });
+    im.userData = { list, st, anim, slots: new Array(n).fill(null), cullR2: cullR * cullR };
     group.add(im);
     return im;
   }
-  const bodyMesh = makeInst(bodyGeo, bodyMat, humans, 'color');
-  const headMesh = new THREE.InstancedMesh(headGeo, headMat, humans.length || 1);
-  headMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); headMesh.castShadow = true; headMesh.frustumCulled = false;
-  for (let i = 0; i < humans.length; i++) headMesh.setColorAt(i, _nCol.setHex(humans[i].skin));
-  if (headMesh.instanceColor) headMesh.instanceColor.needsUpdate = true;
-  group.add(headMesh);
-  const quadMesh = makeInst(quadGeo, quadMat, quads, 'color');
-  const duckMesh = makeInst(duckGeo, duckMat, ducks, 'color');
-  const birdMesh = makeInst(birdGeo, birdMat, birds, 'color');
+  const lin = (hex) => { _nCol.setHex(hex); return [_nCol.r, _nCol.g, _nCol.b]; };
+  const humanMesh = makeInst(humanGeo, humanRig, humans, [
+    ['aSkin', 3, a => lin(a.skin)], ['aTop', 3, a => lin(a.color)], ['aBottom', 3, a => lin(a.bottom)],
+    ['aHair', 3, a => lin(a.hairCol)], ['aStyle', 4, a => a.style],
+  ], 260);
+  const dogMesh = makeInst(dogGeo, dogRig, dogs, [['aCol', 3, a => lin(a.color)]], 140);
+  const catMesh = makeInst(catGeo, catRig, cats, [['aCol', 3, a => lin(a.color)]], 110);
+  const duckMesh = makeInst(duckGeo, duckRig, ducks, [['aCol', 3, a => lin(a.color)], ['aCol2', 3, a => lin(a.head)]], 140);
+  const birdMesh = makeInst(birdGeo, birdRig, birds, [['aCol', 3, a => lin(a.color)]], 600);
+  const meshes = [humanMesh, dogMesh, catMesh, duckMesh, birdMesh];
+  function setAnim(a, phase, gait, sit, flail) {
+    const v = a.animv;
+    v[0] = phase; v[1] = gait; v[2] = sit; v[3] = flail;
+  }
+
+  // pack the visible agents of one mesh into its GPU buffers
+  const _frustum = new THREE.Frustum(), _pv = new THREE.Matrix4(), _sph = new THREE.Sphere();
+  function compact(mesh, camPos, useFrustum) {
+    const u = mesh.userData;
+    const mArr = mesh.instanceMatrix.array, aArr = u.anim.array;
+    let k = 0, staticsDirty = false;
+    for (const a of u.list) {
+      const m = a.mtx;
+      const dx = m[12] - camPos.x, dy = m[13] - camPos.y, dz = m[14] - camPos.z;
+      if (dx * dx + dy * dy + dz * dz > u.cullR2) continue;
+      _sph.center.set(m[12], m[13], m[14]); _sph.radius = 3;
+      if (useFrustum && !_frustum.intersectsSphere(_sph)) continue;
+      mArr.set(m, k * 16);
+      aArr.set(a.animv, k * 4);
+      if (u.slots[k] !== a) {
+        u.slots[k] = a;
+        for (const s of u.st) s.attr.array.set(s.src[a.slotIdx], k * s.size);
+        staticsDirty = true;
+      }
+      k++;
+    }
+    mesh.count = k;
+    mesh.instanceMatrix.needsUpdate = true;
+    u.anim.needsUpdate = true;
+    if (staticsDirty) for (const s of u.st) s.attr.needsUpdate = true;
+  }
 
   // ── behaviour helpers ─────────────────────────────────────────────────────
   function sampleLane(a) {
@@ -388,10 +441,7 @@ function buildNPCs(scene, rng) {
   }
 
   function writeMatrix(a) {
-    if (a.kind === 'human') { bodyMesh.setMatrixAt(a.inst, _nMat); headMesh.setMatrixAt(a.inst, _nMat); }
-    else if (a.kind === 'duck') duckMesh.setMatrixAt(a.inst, _nMat);
-    else if (a.kind === 'bird') birdMesh.setMatrixAt(a.inst, _nMat);
-    else quadMesh.setMatrixAt(a.inst, _nMat);
+    _nMat.toArray(a.mtx);
   }
 
   // sidestep the player when very close (planar test in (arc, lat)).
@@ -497,9 +547,9 @@ function buildNPCs(scene, rng) {
     _nDq.setFromAxisAngle(_NAX_Z, a.rot.z * dt); a.quat.multiply(_nDq);
     if (gScale > 0.3) a.rot.multiplyScalar(Math.max(0, 1 - 1.2 * dt));
     a.splay += dt * 9;
-    const sp = 1 + 0.12 * Math.sin(a.splay);
-    _nScl.set(a.scale * sp, a.scale * (2 - sp), a.scale * sp);
+    _nScl.setScalar(a.scale);
     _nMat.compose(a.pos, a.quat, _nScl);
+    setAnim(a, a.splay, 0, 0, 1);
     writeMatrix(a);
   }
 
@@ -532,10 +582,10 @@ function buildNPCs(scene, rng) {
   function updateHuman(a, dt, tSec, player, doCol) {
     if (a.recover > 0) {
       a.recover -= dt;
-      const k = 1 - a.recover / 0.6;                 // 0→1
-      const sy = 0.45 + 0.55 * k;                    // crumple then stand
+      const k = Math.max(0, a.recover / 0.6);        // 1→0: picked up off the floor
       a.gh = groundH(a.theta, a.lat, a.gh);
-      groundedMatrix(a, a.theta, a.lat, a.gh + a.half * sy, a.yaw || a.baseYaw, 0, sy);
+      groundedMatrix(a, a.theta, a.lat, a.gh + a.half, a.yaw || a.baseYaw, 0, 1);
+      setAnim(a, a.phase, 0, a.sit ? 1 : k * k * (3 - 2 * k), 0);
       writeMatrix(a); return;
     }
     if (a.state === 'walk') {
@@ -552,10 +602,11 @@ function buildNPCs(scene, rng) {
       a.gh = groundH(a.theta, a.lat, a.gh);
       stepHumanCollision(a, player, doCol);
       avoidPlayer(a, player);
-      a.phase += dt * (3 + a.speed * 2);
-      const bob = Math.abs(Math.sin(a.phase)) * 0.06;
-      const lean = Math.sin(a.phase) * 0.08;
-      groundedMatrix(a, a.theta, a.lat, a.gh + a.half + bob, a.yaw, lean, 1);
+      // cadence from speed: one full stride (two steps) is ~1.45 m of an
+      // adult's leg, shorter for a child, so feet don't skate
+      a.phase += dt * a.speed * 4.3 / a.scale;
+      groundedMatrix(a, a.theta, a.lat, a.gh + a.half, a.yaw, 0, 1);
+      setAnim(a, a.phase, Math.min(1, 0.55 + a.speed * 0.32), 0, 0);
       writeMatrix(a);
     } else {
       // idle / chat / sit — stationary with tiny sway
@@ -565,8 +616,8 @@ function buildNPCs(scene, rng) {
       }
       const sway = Math.sin(tSec * a.swayF + a.phase) * (a.state === 'sit' ? 0.03 : 0.06);
       a.gh = groundH(a.anchorTheta, a.anchorLat, a.gh);
-      const sy = a.sit ? 0.55 : 1;
-      groundedMatrix(a, a.anchorTheta, a.anchorLat, a.gh + a.half * sy, a.baseYaw + sway, 0, sy);
+      groundedMatrix(a, a.anchorTheta, a.anchorLat, a.gh + a.half, a.baseYaw + sway, 0, 1);
+      setAnim(a, a.phase, 0, a.sit ? 1 : 0, 0);
       a.theta = a.anchorTheta; a.lat = a.anchorLat; a.yaw = a.baseYaw;
       writeMatrix(a);
     }
@@ -574,9 +625,11 @@ function buildNPCs(scene, rng) {
 
   function updateQuad(a, dt, tSec, player, doCol) {
     if (a.recover > 0) {
-      a.recover -= dt; const sy = 0.5 + 0.5 * (1 - a.recover / 0.6);
+      a.recover -= dt;
       a.gh = groundH(a.theta, a.lat, a.gh);
-      groundedMatrix(a, a.theta, a.lat, a.gh + a.half * sy, a.yaw, 0, sy);
+      groundedMatrix(a, a.theta, a.lat, a.gh + a.half, a.yaw, 0, 1);
+      setAnim(a, a.phase, 0, Math.max(0, a.recover / 0.6), 0);
+      a.pth = a.theta; a.plat = a.lat;
       writeMatrix(a); return;
     }
     if (a.kind === 'dog') {
@@ -625,9 +678,17 @@ function buildNPCs(scene, rng) {
     }
     a.gh = groundH(a.theta, a.lat, a.gh);
     stepQuadCollision(a, player, doCol);
-    a.phase += dt * 8;
-    const bob = (a.kind === 'dog' && a.zoom > 0) ? Math.abs(Math.sin(a.phase)) * 0.05 : 0;
+    // gait from how far it actually moved this frame
+    const moved = Math.hypot(arcDelta(a.pth, a.theta), a.lat - a.plat);
+    a.pth = a.theta; a.plat = a.lat;
+    const v = dt > 0 ? Math.min(6, moved / dt) : 0;
+    a.phase += v * dt * (a.kind === 'cat' ? 11 : 7.5);
+    a.gaitK = (a.gaitK || 0) + (Math.min(1, v * 0.8) - (a.gaitK || 0)) * Math.min(1, dt * 8);
+    const wantSit = (a.kind === 'cat' && a.dart <= 0) || (a.kind === 'dog' && a.gaitK < 0.08) ? 1 : 0;
+    a.sitK += (wantSit - a.sitK) * Math.min(1, dt * 3);
+    const bob = (a.kind === 'dog' && a.zoom > 0) ? Math.abs(Math.sin(a.phase)) * 0.04 : 0;
     groundedMatrix(a, a.theta, a.lat, a.gh + a.half + bob, a.yaw, 0, 1);
+    setAnim(a, a.phase, a.gaitK * (1 - a.sitK), a.sitK, 0);
     writeMatrix(a);
   }
 
@@ -644,6 +705,7 @@ function buildNPCs(scene, rng) {
     a.phase += dt * 3;
     const bob = Math.sin(a.phase) * 0.03;
     groundedMatrix(a, a.theta, a.lat, NPC_DUCK_H + a.half + bob, a.yaw + Math.sin(tSec * 0.4 + a.phase) * 0.2, 0, 1);
+    setAnim(a, a.driftDir * 1.7 + a.speed * 9, 0, 0, 0);
     writeMatrix(a);
   }
 
@@ -651,21 +713,21 @@ function buildNPCs(scene, rng) {
     a.theta += a.birdSpeed * dt;
     const lat = a.latC + Math.sin(tSec * a.latF + a.latPh) * a.latAmp;
     const h = a.hBase + Math.sin(tSec * a.hF + a.hPh) * a.hAmp;
-    // face along travel; wings flap via y-scale
+    // face along travel; the wings flap in the shader (figures.js)
     const yaw = a.birdSpeed > 0 ? 0 : Math.PI;
-    const flap = 0.6 + 0.5 * Math.sin(tSec * a.wingF + a.wingPh);
     frameQuaternion(a.theta, _nQ);
     _nQy.setFromAxisAngle(_NAX_Y, yaw); _nQ.multiply(_nQy);
-    _nScl.set(a.scale, a.scale, a.scale * flap);
+    _nScl.setScalar(a.scale);
+    setAnim(a, a.wingPh, a.wingF, 0, 0);
     torusPosition(a.theta, lat, h, _nP);
     _nMat.compose(_nP, _nQ, _nScl);
-    birdMesh.setMatrixAt(a.inst, _nMat);
+    _nMat.toArray(a.mtx);
   }
 
   // ── per-frame driver ───────────────────────────────────────────────────────
   let prevG = 1;
   let _frameParity = 0;
-  function update(dt, gScale, zeroG, player, lift = 0) {
+  function update(dt, gScale, zeroG, player, lift = 0, camera = null) {
     if (prevG >= NPC_KICK_G && gScale < NPC_KICK_G) kick();
     _rising = gScale > prevG + 1e-6;
     _lift = lift;
@@ -683,16 +745,19 @@ function buildNPCs(scene, rng) {
       else updateQuad(a, dt, tSec, player, doCol);
     }
 
-    bodyMesh.instanceMatrix.needsUpdate = true;
-    headMesh.instanceMatrix.needsUpdate = true;
-    quadMesh.instanceMatrix.needsUpdate = true;
-    duckMesh.instanceMatrix.needsUpdate = true;
-    birdMesh.instanceMatrix.needsUpdate = true;
+    if (camera) {
+      _pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      _frustum.setFromProjectionMatrix(_pv);
+      camera.getWorldPosition(_nCam);
+    } else if (player) _nCam.copy(player.pos);
+    for (const m of meshes) compact(m, _nCam, !!camera);
+    for (const r of rigs) r.setTime(tSec % 3600);
   }
 
   return {
     update, agents,
     counts: { humans: humans.length, dogs: quads.filter(q => q.kind === 'dog').length,
       cats: quads.filter(q => q.kind === 'cat').length, ducks: ducks.length, birds: birds.length },
+    meshes,
   };
 }

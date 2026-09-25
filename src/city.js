@@ -2,6 +2,25 @@
 
 const _cityM = new THREE.Matrix4();
 
+// Every paved patch lying on the terrain ({theta, lat, r} discs or
+// {theta, lat, arc, dlat} rectangles) — grass.js keeps its blades off them.
+const PAVED_AREAS = [];
+
+// Clipped box / yew / privet: the leaf texture as a solid (no alpha) skin, so
+// a hedge or a planter shrub is a dense mass of small leaves, not a smooth
+// green solid. The leaf map's transparent texels already carry leaf colour.
+const _topiaryMaps = {};
+function topiaryMaterial(textures, repeat, color = 0xffffff) {
+  const key = repeat.join('x');
+  if (!_topiaryMaps[key]) {
+    const map = textures.leaf.clone(); map.repeat.set(repeat[0], repeat[1]); map.needsUpdate = true;
+    const nrm = textures.leafN.clone(); nrm.repeat.set(repeat[0], repeat[1]); nrm.needsUpdate = true;
+    _topiaryMaps[key] = { map, nrm };
+  }
+  const { map, nrm } = _topiaryMaps[key];
+  return new THREE.MeshStandardMaterial({ map, normalMap: nrm, normalScale: new THREE.Vector2(1.4, 1.4), color, roughness: 0.85 });
+}
+
 // Ground-aware placement: raise h by the terrain/patch height at (theta, lat) so
 // nothing floats or sinks on the rolling floor. Set-pieces sit on flat spots so
 // groundH there is 0 and their coordinates are unchanged.
@@ -57,6 +76,7 @@ function gableRoofGeometry(latDepth, arcWidth, roofH, wallH, chimney = false) {
 // puts its corners out in the feathered slope, where the paving and the terrain
 // interpenetrate and tear.
 function drapedDisc(cTheta, cLat, radius, rings = 10, segs = 40, lift = 0.06) {
+  PAVED_AREAS.push({ theta: cTheta, lat: cLat, r: radius + 0.3 });
   const pos = [], uv = [], idx = [];
   const p = new THREE.Vector3();
   for (let r = 0; r <= rings; r++) {
@@ -295,7 +315,10 @@ function buildCity(scene, textures, colliders, rng) {
         // face inward toward the courtyard centre
         if (placeHouse(ht, hl, Math.atan2(-Math.cos(ang), -Math.sin(ang)))) placed++;
       }
-      if (placed >= 2) plazaDiscs.push({ theta: cTheta, lat: cLat, scale: cr * 0.6 });
+      if (placed >= 2) {
+        plazaDiscs.push({ theta: cTheta, lat: cLat, scale: cr * 0.6 });
+        PAVED_AREAS.push({ theta: cTheta, lat: cLat, r: cr * 0.6 + 0.3 });
+      }
     }
   }
 
@@ -352,7 +375,7 @@ function buildCity(scene, textures, colliders, rng) {
   {
     const hedgeGeo = new THREE.BoxGeometry(0.75, 0.95, 2.3);
     hedgeGeo.translate(0, 0.47, 0);
-    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1 });
+    const hedgeMat = topiaryMaterial(textures, [2, 2]);
     const hc = new THREE.Color();
     const hedges = instancedFrom(hedgeGeo, hedgeMat, hedgePlacements.map(p => ({
       ...p, tint: hc.setHSL(0.27 + rng() * 0.06, 0.5, 0.24 + rng() * 0.1).clone(),
@@ -461,10 +484,8 @@ function buildCity(scene, textures, colliders, rng) {
       const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.65, 0.7, 12), potMat);
       pot.position.y = 0.35;
       const shrub = new THREE.Mesh(
-        new THREE.SphereGeometry(0.75, 10, 8),
-        new THREE.MeshStandardMaterial({
-          color: new THREE.Color().setHSL(0.28 + rng() * 0.05, 0.5, 0.3), roughness: 1,
-        })
+        new THREE.SphereGeometry(0.75, 20, 14),
+        topiaryMaterial(textures, [3, 2], new THREE.Color().setHSL(0.26 + rng() * 0.05, 0.42, 0.42))
       );
       shrub.position.y = 1.05;
       shrub.scale.y = 0.85;
@@ -479,6 +500,7 @@ function buildCity(scene, textures, colliders, rng) {
     // the spawn point (4.3°,−13). Purely decorative.
     {
       const RC = 5 * DEG, RL = 18;   // court centre
+      PAVED_AREAS.push({ theta: RC, lat: RL, arc: 13.3, dlat: 11.3 });
       // plaza apron (flat textured slab)
       const apron = new THREE.Mesh(
         sweepProfile([[RL - 11, 0.05], [RL + 11, 0.05]], {

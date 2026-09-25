@@ -14,32 +14,129 @@ function buildVegetation(scene, textures, colliders, rng) {
   scene.add(veg);
 
   const barkMat = new THREE.MeshStandardMaterial({ map: textures.bark, normalMap: textures.barkN, roughness: 0.95 });
-  const leafTex = textures.leaf.clone();
-  leafTex.repeat.set(6, 6);
-  const leafMat = new THREE.MeshStandardMaterial({
-    map: leafTex, alphaTest: 0.35, side: THREE.DoubleSide, roughness: 0.9,
-  });
-  // Conifers were flat-shaded cones, which read as plastic party hats. Giving
-  // them the same alpha-cut needle texture as the broadleaf canopies breaks the
-  // silhouette and lets light through the edges.
-  const pineTex = textures.leaf.clone();
-  pineTex.repeat.set(7, 4);
-  const pineMat = new THREE.MeshStandardMaterial({
-    map: pineTex, color: 0x8fbf86, alphaTest: 0.28, side: THREE.DoubleSide, roughness: 0.95,
-  });
+  // ── foliage material ──
+  // Alpha-to-coverage instead of a hard alpha test: with the 4× MSAA scene
+  // target every leaf edge is antialiased, and the alpha is rescaled per mip
+  // level so canopies keep their density into the distance instead of
+  // dissolving as the mips average the gaps in. The shadow pass still uses the
+  // plain alpha test (dappled shade). On top: thin-leaf translucency toward
+  // the sun, a canopy AO term (dark in the crown's underside and core), and
+  // wind — a slow sway of the whole crown plus a fast per-leaf flutter.
+  const foliageShaders = [];
+  function foliageMat(tex, nrm, repeat, { color = 0xffffff, alphaTest = 0.4, sway = 1, edgeFade = false } = {}) {
+    const map = tex.clone(); map.repeat.set(repeat[0], repeat[1]);
+    const nmap = nrm.clone(); nmap.repeat.set(repeat[0], repeat[1]);
+    const m = new THREE.MeshStandardMaterial({
+      map, normalMap: nmap, normalScale: new THREE.Vector2(0.8, 0.8), color,
+      alphaTest, alphaToCoverage: true, side: THREE.DoubleSide, roughness: 0.82,
+    });
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uFolTime = { value: 0 };
+      foliageShaders.push(sh);
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', `#include <common>
+          uniform float uFolTime;
+          varying float vFolAO;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          #ifdef USE_INSTANCING
+            vec3 fip = instanceMatrix[3].xyz;
+          #else
+            vec3 fip = vec3(0.0);
+          #endif
+          float fph = dot(fip, vec3(0.071, 0.113, 0.093));
+          float fk = max(0.0, position.y - 1.6) * ${(0.022 * sway).toFixed(4)};
+          transformed.x += (sin(uFolTime * 0.9 + fph) * 0.7 + sin(uFolTime * 2.1 + fph * 1.7) * 0.3) * fk;
+          transformed.z += (cos(uFolTime * 0.7 + fph * 1.3) * 0.6) * fk;
+          transformed += objectNormal * sin(uFolTime * 5.0 + dot(position, vec3(3.1, 2.3, 2.9)) + fph) * ${(0.035 * sway).toFixed(4)};
+          vFolAO = mix(0.5, 1.0, smoothstep(-0.7, 0.6, objectNormal.y));`);
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', `#include <common>
+          varying float vFolAO;`)
+        .replace('#include <alphatest_fragment>', `
+          // mip-aware alpha + sharpen, fed to alpha-to-coverage
+          #ifdef USE_MAP
+            vec2 fsz = vec2(textureSize(map, 0));
+            vec2 fdx = dFdx(vMapUv * fsz), fdy = dFdy(vMapUv * fsz);
+            float fmip = max(0.0, 0.5 * log2(max(dot(fdx, fdx), dot(fdy, fdy))));
+            diffuseColor.a *= 1.0 + fmip * 0.18;
+          #endif
+          ${edgeFade ? `{
+            // a card seen edge-on is a streak, not foliage: thin it out
+            vec3 fgn = normalize(cross(dFdx(vViewPosition), dFdy(vViewPosition)));
+            diffuseColor.a *= smoothstep(0.08, 0.4, abs(dot(fgn, normalize(vViewPosition))));
+          }` : ''}
+          diffuseColor.a = clamp((diffuseColor.a - alphaTest) / max(fwidth(diffuseColor.a), 1e-4) + 0.5, 0.0, 1.0);
+          if (diffuseColor.a < 0.01) discard;`)
+        .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+          #if NUM_DIR_LIGHTS > 0
+          {
+            vec3 fL = directionalLights[0].direction;
+            vec3 fV = normalize(-vViewPosition);
+            float fBack = max(0.0, -dot(normal, fL));
+            // x⁶ by multiplication: Metal's fast-math pow(0, y) can return NaN,
+            // and a single NaN texel blooms into a blinking light in the crown
+            float fThru = max(0.0, dot(fV, fL)); fThru *= fThru; fThru = fThru * fThru * fThru;
+            reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * (0.22 * fBack + 0.55 * fThru) * vFolAO;
+          }
+          #endif
+          reflectedLight.indirectDiffuse *= vFolAO;
+          reflectedLight.directDiffuse *= mix(0.75, 1.0, vFolAO);`);
+    };
+    m.customProgramCacheKey = () => 'foliage-v1-' + sway + (edgeFade ? '-e' : '');
+    return m;
+  }
+  const leafMat = foliageMat(textures.leaf, textures.leafN, [6, 6]);
+  leafMat.name = 'leaf';
+  // Conifers were flat-shaded cones, which read as plastic party hats. Needle
+  // twigs on an alpha-cut card break the silhouette and let light through.
+  const pineMat = foliageMat(textures.needle, textures.needleN, [7, 4], { color: 0x9fbf92, alphaTest: 0.35, sway: 0.6 });
+  pineMat.name = 'pine';
 
   // ── tree geometries (trunk + canopy merged, two material groups) ──
   function treeGeo(parts) {
     const merged = mergeGeometries(parts.map(p => p.geo), true);
-    return merged;
+    return fixZeroNormals(merged);
+  }
+  // Crowns are lumpy: every canopy lobe is pushed in and out by a smooth 3-D
+  // noise of its own vertex positions, so the silhouette breaks into clumps
+  // instead of the perfect ball a raw sphere gives.
+  const _lump = (x, y, z) => {
+    const f = (a, b, c) => Math.sin(a * 1.7 + b * 0.9) * Math.sin(b * 1.3 - c * 1.1) * Math.sin(c * 1.9 + a * 0.7);
+    return f(x, y, z) * 0.6 + f(x * 2.3 + 5, y * 2.1 + 1, z * 2.7 + 3) * 0.4;
+  };
+  function lumpy(g, amt) {
+    const pos = g.attributes.position;
+    g.computeBoundingSphere();
+    const c = g.boundingSphere.center;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      const k = 1 + amt * _lump(x, y, z);
+      pos.setXYZ(i, c.x + (x - c.x) * k, c.y + (y - c.y) * k, c.z + (z - c.z) * k);
+    }
+    g.computeVertexNormals();
+    return g;
   }
   const sph = (x, y, z, r, sy = 1) => {
-    const g = new THREE.SphereGeometry(r, 10, 8);
+    const g = new THREE.SphereGeometry(r, 14, 10);
     g.scale(1, sy, 1); g.translate(x, y, z);
-    return g;
+    return lumpy(g, 0.22);
   };
+  // Conifer tiers: open cones whose skirt is ragged — each rim vertex dropped
+  // or lifted and pushed in or out — so a tier ends in drooping boughs, not a
+  // ruler-straight hem.
   const cone = (y, r, h) => {
-    const g = new THREE.ConeGeometry(r, h, 10);
+    const g = new THREE.ConeGeometry(r, h, 16, 3, true);
+    const pos = g.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const vy = pos.getY(i);
+      const k = (h / 2 - vy) / h;                    // 0 at tip → 1 at rim
+      if (k < 0.3) continue;
+      const x = pos.getX(i), z = pos.getZ(i), a = Math.atan2(z, x);
+      const n = Math.sin(a * 5 + y * 3.1) * 0.6 + Math.sin(a * 11 + y * 1.7) * 0.4;
+      const w = (k - 0.3) / 0.7;
+      pos.setXYZ(i, x * (1 + 0.14 * n * w), vy - (0.32 * (0.5 + 0.5 * n)) * h * 0.25 * w, z * (1 + 0.14 * n * w));
+    }
+    g.computeVertexNormals();
     g.translate(0, y, 0);
     return g;
   };
@@ -49,16 +146,69 @@ function buildVegetation(scene, textures, colliders, rng) {
     return g;
   };
 
+  // ── leaf-clump cards ──
+  // The near trees' crowns are a darker, shrunken core (so you never see sky
+  // straight through the middle) wrapped in alpha-cut cards, each a clump of
+  // leaves, scattered over the crown's shell. The cards' normals are bent to
+  // point out from the crown centre, so the whole crown lights like one soft
+  // volume instead of a pile of flat quads — and its silhouette is ragged
+  // leaves, not a sphere's edge. Deterministic, off its own seed.
+  const cardRng = mulberry32(0x7ee5);
+  function crownCards(cx, cy, cz, r, sy = 1, density = 4.2) {
+    const n = Math.max(6, Math.round(density * r * Math.sqrt(sy)));
+    const parts = [];
+    const d = new THREE.Vector3(), q = new THREE.Quaternion(), e = new THREE.Euler();
+    const cen = new THREE.Vector3(cx, cy, cz);
+    for (let i = 0; i < n; i++) {
+      // uniform on the sphere, then squashed to the lobe's shape
+      const u = cardRng() * 2 - 1, a = cardRng() * Math.PI * 2, rr = Math.sqrt(1 - u * u);
+      d.set(rr * Math.cos(a), u, rr * Math.sin(a));
+      if (d.y < -0.55) d.y *= 0.5;                       // fewer cards on the underside
+      const size = r * (0.95 + cardRng() * 0.55);
+      const g = new THREE.PlaneGeometry(size, size);
+      e.set((cardRng() - 0.5) * 1.0, (cardRng() - 0.5) * 1.0, cardRng() * Math.PI * 2);
+      g.applyQuaternion(q.setFromEuler(e));
+      g.applyQuaternion(q.setFromUnitVectors(new THREE.Vector3(0, 0, 1), d.clone().normalize()));
+      const rad = r * (0.5 + cardRng() * 0.38);
+      g.translate(cx + d.x * rad, cy + d.y * rad * sy, cz + d.z * rad);
+      parts.push(g);
+    }
+    const g = mergeGeometries(parts);
+    const pos = g.attributes.position, nrm = g.attributes.normal;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.set(pos.getX(i) - cen.x, (pos.getY(i) - cen.y) / sy, pos.getZ(i) - cen.z).normalize();
+      nrm.setXYZ(i, v.x, v.y * 0.85 + 0.15, v.z);
+    }
+    return g;
+  }
+  const cardMat = foliageMat(textures.leafCard, textures.leafCardN, [1, 1], { alphaTest: 0.42, edgeFade: true });
+  cardMat.name = 'card';
+
+  // a limb from the trunk top out into a crown lobe
+  const limb = (x0, y0, z0, x1, y1, z1, r0, r1) => {
+    const a = new THREE.Vector3(x0, y0, z0), b = new THREE.Vector3(x1, y1, z1);
+    const dir = b.clone().sub(a), L = dir.length();
+    const g = new THREE.CylinderGeometry(r1, r0, L, 6);
+    g.translate(0, L / 2, 0);
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize()));
+    g.translate(x0, y0, z0);
+    return g;
+  };
+  const OAK_LOBES = [[0, 4.5, 0, 2.5], [1.5, 3.8, 0.8, 1.8], [-1.4, 4.0, -0.7, 1.9], [0.5, 5.6, -1.1, 1.5], [-0.9, 5.3, 1.2, 1.4]];
   const oakGeo = treeGeo([
-    { geo: trunk(3.4, 0.28, 0.45) },
     { geo: mergeGeometries([
-      sph(0, 4.5, 0, 2.5), sph(1.5, 3.8, 0.8, 1.8), sph(-1.4, 4.0, -0.7, 1.9),
-      sph(0.5, 5.6, -1.1, 1.5), sph(-0.9, 5.3, 1.2, 1.4),
+      trunk(3.4, 0.28, 0.45),
+      limb(0, 3.0, 0, 1.3, 4.1, 0.7, 0.2, 0.08), limb(0, 3.1, 0, -1.2, 4.3, -0.6, 0.2, 0.08),
+      limb(0, 3.3, 0, 0.4, 5.3, -0.9, 0.17, 0.07), limb(0, 3.3, 0, -0.7, 5.0, 1.0, 0.16, 0.06),
     ]) },
+    { geo: mergeGeometries(OAK_LOBES.map(([x, y, z, r]) => sph(x, y, z, r * 0.76))) },
+    { geo: mergeGeometries(OAK_LOBES.map(([x, y, z, r]) => crownCards(x, y, z, r))) },
   ]);
   const poplarGeo = treeGeo([
     { geo: trunk(4.8, 0.18, 0.3) },
-    { geo: mergeGeometries([sph(0, 6.1, 0, 1.35, 2.6), sph(0.35, 4.4, 0.3, 1.0, 1.9)]) },
+    { geo: mergeGeometries([sph(0, 6.1, 0, 1.35 * 0.78, 2.6), sph(0.35, 4.4, 0.3, 1.0 * 0.78, 1.9)]) },
+    { geo: mergeGeometries([crownCards(0, 6.1, 0, 1.35, 2.6, 5.5), crownCards(0.35, 4.4, 0.3, 1.0, 1.9, 5.5)]) },
   ]);
   // more tiers, each slightly offset — a real conifer is not a stack of
   // perfectly concentric cones
@@ -76,9 +226,9 @@ function buildVegetation(scene, textures, colliders, rng) {
   // those numbers. These carry a quarter of the geometry; past ~40 m — which is
   // where nearly all of them are — the silhouette is what reads, not the facets.
   const loSph = (x, y, z, r, sy = 1) => {
-    const g = new THREE.SphereGeometry(r, 6, 5);
+    const g = new THREE.SphereGeometry(r, 7, 5);
     g.scale(1, sy, 1); g.translate(x, y, z);
-    return g;
+    return lumpy(g, 0.14);
   };
   const loCone = (y, r, h) => {
     const g = new THREE.ConeGeometry(r, h, 6);
@@ -711,9 +861,11 @@ function buildVegetation(scene, textures, colliders, rng) {
     }
   }
 
-  const leafTint = () => _c.setHSL(0.25 + rng() * 0.08, 0.34 + rng() * 0.22, 0.28 + rng() * 0.14).clone();
-  addInstanced(oakGeo, [barkMat, leafMat], oaks, { tintFn: leafTint });
-  addInstanced(poplarGeo, [barkMat, leafMat], poplars, { tintFn: leafTint });
+  // real canopies are darker and far less saturated than a paint-box green;
+  // the spread in hue (olive → blue-green) is what makes a wood read as mixed
+  const leafTint = () => _c.setHSL(0.2 + rng() * 0.12, 0.26 + rng() * 0.2, 0.3 + rng() * 0.13).clone();
+  addInstanced(oakGeo, [barkMat, leafMat, cardMat], oaks, { tintFn: leafTint });
+  addInstanced(poplarGeo, [barkMat, leafMat, cardMat], poplars, { tintFn: leafTint });
   addInstanced(pineGeo, [barkMat, pineMat], pines);
 
   addInstanced(oakLoGeo, [barkMat, leafMat], oaksLo, { tintFn: leafTint });
@@ -748,10 +900,23 @@ function buildVegetation(scene, textures, colliders, rng) {
   });
   addInstanced(tuftGeo, tuftMat, tufts, { shadow: false, tintFn: leafTint });
 
-  // rocks: low-poly, squashed at random
-  const rockGeo = new THREE.IcosahedronGeometry(0.7, 0);
+  // rocks: squashed at random, with a worn (not faceted) shape and the same
+  // stone texture as the boulders and the scree
+  const rockGeo = new THREE.IcosahedronGeometry(0.7, 1);
+  {
+    const pos = rockGeo.attributes.position;
+    const rrng = mulberry32(4242);
+    for (let i = 0; i < pos.count; i++) {
+      const f = 0.8 + rrng() * 0.32;
+      pos.setXYZ(i, pos.getX(i) * f, pos.getY(i) * f, pos.getZ(i) * f);
+    }
+    rockGeo.computeVertexNormals();
+  }
   rockGeo.translate(0, 0.28, 0);
-  const rockMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0.05 });
+  const rockMat = new THREE.MeshStandardMaterial({
+    map: textures.rock, normalMap: textures.rockN, roughnessMap: textures.rockR,
+    color: 0xffffff, roughness: 1, metalness: 0.02,
+  });
   const rockTint = () => _c.setHSL(0.08 + rng() * 0.04, 0.04 + rng() * 0.06, 0.32 + rng() * 0.2).clone();
   addInstanced(rockGeo, rockMat, rocks.map(r => ({
     ...r, scale: new THREE.Vector3(r.scale * (0.7 + rng() * 0.8), r.scale * (0.4 + rng() * 0.5), r.scale * (0.7 + rng() * 0.8)),
@@ -794,7 +959,8 @@ function buildVegetation(scene, textures, colliders, rng) {
 
   // blossom trees: same canopy geometry, warm-tinted
   const blossomTint = () => _c.setHSL(0.94 + rng() * 0.07, 0.35 + rng() * 0.3, 0.68 + rng() * 0.16).clone();
-  addInstanced(oakGeo, [barkMat, leafMat.clone()], blossoms, { tintFn: blossomTint });
+  addInstanced(oakGeo, [barkMat, foliageMat(textures.leaf, textures.leafN, [6, 6]),
+    foliageMat(textures.leafCard, textures.leafCardN, [1, 1], { alphaTest: 0.42, edgeFade: true })], blossoms, { tintFn: blossomTint });
 
   // flowers: small warm-tinted tufts in beds
   const flowerTint = () => _c.setHSL(rng() < 0.5 ? 0.93 + rng() * 0.09 : 0.11 + rng() * 0.05, 0.7, 0.6 + rng() * 0.15).clone();
@@ -806,5 +972,8 @@ function buildVegetation(scene, textures, colliders, rng) {
     ...r, scale: new THREE.Vector3(r.scale * 0.55, r.scale * 2.3, r.scale * 0.55),
   })), { shadow: false, tintFn: reedTint });
 
-  return { group: veg };
+  return {
+    group: veg,
+    update(t) { for (const sh of foliageShaders) sh.uniforms.uFolTime.value = t; },
+  };
 }

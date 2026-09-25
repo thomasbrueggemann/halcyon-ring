@@ -1,9 +1,12 @@
 // ── HALCYON RING — main loop ────────────────────────────────────────────────
 
 // ── renderer / scene ──
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// No default-framebuffer MSAA: the scene is drawn into postfx.js's 4× MSAA
+// HDR target, and the only thing that reaches the canvas is a full-screen quad.
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+const MAX_PR = Math.min(window.devicePixelRatio, 1.75);
+renderer.setPixelRatio(MAX_PR);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -19,6 +22,7 @@ scene.fog = new THREE.FogExp2(0xb6cfd8, 0.00082);
 
 const camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 60000);
 scene.add(camera);
+const postfx = createPostFX(renderer, scene, camera);
 
 // ── image-based lighting ────────────────────────────────────────────────────
 // A tiny painted equirect of what the interior actually surrounds you with —
@@ -56,9 +60,11 @@ scene.add(camera);
 // ── lights ──
 const sun = new THREE.DirectionalLight(0xfff2e0, 2.5);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -120; sun.shadow.camera.right = 120;
-sun.shadow.camera.top = 120; sun.shadow.camera.bottom = -120;
+const SHADOW_N = renderer.capabilities.maxTextureSize >= 8192 ? 4096 : 2048;
+const SHADOW_HALF = 110;
+sun.shadow.mapSize.set(SHADOW_N, SHADOW_N);
+sun.shadow.camera.left = -SHADOW_HALF; sun.shadow.camera.right = SHADOW_HALF;
+sun.shadow.camera.top = SHADOW_HALF; sun.shadow.camera.bottom = -SHADOW_HALF;
 sun.shadow.camera.near = 1; sun.shadow.camera.far = 900;
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.035;
@@ -85,11 +91,13 @@ const { stations } = city;
 // buildings the city just put up (and bores through the ones it cannot dodge),
 // which is why it needs a handle on the city.
 const transit = buildTransit(scene, colliders, rng, city, textures);
-buildVegetation(scene, textures, colliders, rng);
+const vegetation = buildVegetation(scene, textures, colliders, rng);
+const grass = buildGrass(scene, world, colliders);
 const props = buildProps(scene, textures, rng);
 const hydro = buildHydro(scene, rng);
 
 const player = new Player(camera, colliders);
+grass.prime(player);
 transit.player = player;
 const gravity = new GravitySystem(rng);
 const ui = new UI();
@@ -97,6 +105,8 @@ const audio = new AudioEngine();
 transit.audio = audio;
 const puzzles = new PuzzleManager({ stations, ui, audio, gravity, player, rng });
 const npcs = buildNPCs(scene, rng);   // appended after all existing rng consumers
+// every flat-colour material in the finished world gets triplanar micro-detail
+const surfaces = upgradeSurfaces(scene);
 
 // zero-g drifting leaves/dust around the player
 const driftGroup = new THREE.Group();
@@ -247,14 +257,47 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  postfx.setSize(window.innerWidth, window.innerHeight);
 });
 
-window.__game = { player, gravity, puzzles, stations, scene, camera, transit, npcs, hydro, props, world };
+window.__game = { renderer, postfx, grass, vegetation, player, gravity, puzzles, stations, scene, camera, transit, npcs, hydro, props, world };
+
+// ── adaptive resolution ──
+// The HDR/MSAA/SSAO/bloom stack scales with pixel count, and a retina panel
+// has 3-4× the pixels of the screens this was tuned on. Rather than pick one
+// compromise, watch the frame time: step the render scale down while frames
+// run long, and try stepping back up after a long stretch at full rate (with
+// vsync on, "at full rate" is the only headroom signal there is). A step that
+// immediately fails lowers the ceiling so it doesn't oscillate.
+const adaptive = { pr: MAX_PR, ceil: MAX_PR, acc: 0, n: 0, good: 0, lastUp: -1 };
+window.__game.adaptive = adaptive;
+function adaptResolution(dt, t) {
+  if (!player.enabled) return;
+  adaptive.acc += dt; adaptive.n++;
+  if (adaptive.acc < 1.5) return;
+  const avg = adaptive.acc / adaptive.n;
+  adaptive.acc = 0; adaptive.n = 0;
+  let next = adaptive.pr;
+  if (avg > 1 / 50) {
+    next = Math.max(0.75, adaptive.pr - 0.125);
+    if (adaptive.lastUp >= 0 && t - adaptive.lastUp < 4) adaptive.ceil = Math.max(0.75, adaptive.pr - 0.125);
+    adaptive.good = 0;
+  } else if (avg < 1 / 57) {
+    if (++adaptive.good >= 4 && adaptive.pr < adaptive.ceil) { next = Math.min(adaptive.ceil, adaptive.pr + 0.125); adaptive.lastUp = t; adaptive.good = 0; }
+  } else adaptive.good = 0;
+  if (next !== adaptive.pr) {
+    adaptive.pr = next;
+    renderer.setPixelRatio(next);
+    postfx.setSize(window.innerWidth, window.innerHeight);
+  }
+}
 
 // ── frame loop ──
 const clock = new THREE.Clock();
 const _mainUp = new THREE.Vector3();
 const _mainTan = new THREE.Vector3();
+const _sunDir = new THREE.Vector3(), _sunR = new THREE.Vector3(), _sunU = new THREE.Vector3();
+const SUN_STEP = 0.8 / RF;
 
 function animate() {
   requestAnimationFrame(animate);
@@ -276,8 +319,10 @@ function animate() {
   player.gpInteractPressed = false;
   transit.update(dt);
   props.update(dt, gScale, gravity.zeroG, lift);
-  npcs.update(dt, gScale, gravity.zeroG, player, lift);
+  npcs.update(dt, gScale, gravity.zeroG, player, lift, camera);
   hydro.update(dt, gScale, lift);
+  grass.update(dt, t, player, gScale);
+  vegetation.update(t);
   puzzles.update(dt);
   if (transit.prompt) ui.setPrompt(transit.prompt);   // transit hint overrides
   sky.update(gravity.spinAngle);
@@ -290,14 +335,28 @@ function animate() {
     camera.position.z += (Math.random() - 0.5) * 0.05 * shake;
   }
 
-  // sun follows the player so local light always comes from "above"
-  upAt(player.theta, _mainUp);
-  tangentAt(player.theta, _mainTan);
-  sun.position.copy(player.pos)
-    .addScaledVector(_mainUp, 360)
-    .addScaledVector(_mainTan, 150);
-  sun.position.y += 45;      // only a slight lat lean, so neither rim is fully backlit
-  sun.target.position.copy(player.pos);
+  // sun follows the player so local light always comes from "above". The
+  // direction is quantised (every ~0.8 m of arc) and the shadow frustum's
+  // centre is snapped to whole shadow-map texels in light space, so walking
+  // doesn't make every shadow edge crawl.
+  {
+    const thQ = Math.round(player.theta / SUN_STEP) * SUN_STEP;
+    upAt(thQ, _mainUp);
+    tangentAt(thQ, _mainTan);
+    _sunDir.copy(_mainUp).multiplyScalar(360).addScaledVector(_mainTan, 150);
+    _sunDir.y += 45;         // only a slight lat lean, so neither rim is fully backlit
+    const dist = _sunDir.length();
+    _sunDir.divideScalar(dist);
+    // light-space axes
+    _sunR.set(0, 1, 0).cross(_sunDir).normalize();
+    _sunU.copy(_sunDir).cross(_sunR);
+    const texel = (2 * SHADOW_HALF) / SHADOW_N;
+    const pr = Math.round(player.pos.dot(_sunR) / texel) * texel;
+    const pu = Math.round(player.pos.dot(_sunU) / texel) * texel;
+    const pd = player.pos.dot(_sunDir);
+    sun.target.position.copy(_sunR).multiplyScalar(pr).addScaledVector(_sunU, pu).addScaledVector(_sunDir, pd);
+    sun.position.copy(sun.target.position).addScaledVector(_sunDir, dist);
+  }
 
   // ambient animation
   world.update(t, dt);
@@ -340,6 +399,10 @@ function animate() {
     waypoint.visible = false;
   }
 
-  renderer.render(scene, camera);
+  // red wash while the flywheel is spinning down
+  const tintTarget = gravity.mode === 'spindown' ? 0.10 + 0.08 * Math.sin(t * 7) : 0;
+  postfx.uniforms.uTint.value += (tintTarget - postfx.uniforms.uTint.value) * Math.min(1, dt * 4);
+  postfx.render(t);
+  adaptResolution(dt, t);
 }
 animate();
