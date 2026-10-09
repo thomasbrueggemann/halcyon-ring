@@ -356,7 +356,7 @@ function makeTextures() {
     const stoneId = new Int32Array(S * S).fill(-1);
     const tones = [];
     const prng = mulberry32(6161);
-    const JOINT = 3, BEVEL = 5;
+    const JOINT = 4, BEVEL = 6;
     // courses: heights 40..72 px, filling the 512 exactly (last course absorbs)
     let y = 0, course = 0, id = 0;
     const rowsY = [];
@@ -388,7 +388,7 @@ function makeTextures() {
       const i = y * S + x;
       const t = v * 0.55 + p * 0.45;
       const sid = stoneId[i];
-      if (sid < 0) return [58 - p * 14, 55 - p * 12, 50 - p * 10];      // joint: dark, gritty
+      if (sid < 0) return [96 - p * 22, 90 - p * 20, 80 - p * 17];      // joint: sand-and-grit infill, not a black line (a 3 px near-black line aliases to shimmer at range)
       const [tone, hue] = tones[sid];
       let g = _mix(118, 168, t) * tone;
       // sandstone → limestone → blue-grey: three quarry tones across the pavers
