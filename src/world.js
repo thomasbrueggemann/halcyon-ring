@@ -271,7 +271,7 @@ function makeWaterMaterial(textures) {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     normalMap: textures.waterN1,
-    roughness: 0.15, metalness: 0.02, envMapIntensity: 0.9,
+    roughness: 0.15, metalness: 0.02, envMapIntensity: 0.7,
     transparent: true, side: THREE.DoubleSide, depthWrite: false,
   });
   const uniforms = {
@@ -323,15 +323,9 @@ function makeWaterMaterial(textures) {
         vec3 n1 = texture2D(wN1, r1).xyz * 2.0 - 1.0;
         vec3 n2 = texture2D(wN2, r2).xyz * 2.0 - 1.0;
         vec3 nl = normalize(vec3(n1.xy * 0.34 + n2.xy * 0.22, 1.0));
-        normal = normalize(nl.x * vTanW + nl.y * vBitW + nl.z * vNrmW);
-        // Fresnel: at grazing angles water is a mirror (opaque, glossy), looking
-        // straight down it is a window onto the bed. Without this it reflects
-        // the same amount from every angle and reads as a tinted plastic sheet.
-        float wFr = pow(1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0), 4.0);
-        diffuseColor.a = clamp(diffuseColor.a + wFr * 0.5, 0.0, 1.0);
-        roughnessFactor = mix(roughnessFactor, 0.04, wFr);`);
+        normal = normalize(nl.x * vTanW + nl.y * vBitW + nl.z * vNrmW);`);
   };
-  mat.customProgramCacheKey = () => 'water-v2';
+  mat.customProgramCacheKey = () => 'water-v1';
   return mat;
 }
 

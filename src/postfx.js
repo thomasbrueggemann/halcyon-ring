@@ -200,7 +200,7 @@ function createPostFX(renderer, scene, camera) {
       uBloom: { value: 0.14 }, uVignette: { value: 0.32 }, uTime: { value: 0 },
       uSat: { value: 1.06 }, uTint: { value: 0 },
       tDepth: { value: hdr.depthTexture }, uInvProj: { value: new THREE.Matrix4() }, uSunUV: { value: new THREE.Vector2(0.5, 0.5) },
-      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.35 }, uScatter: { value: 1.0 }, uFx: { value: 1 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
+      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.12 }, uScatter: { value: 0.55 }, uFx: { value: 1 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
     },
     vertexShader: VERT,
     fragmentShader: /* glsl */`
@@ -222,7 +222,7 @@ function createPostFX(renderer, scene, camera) {
           vec3 blur = (texture2D(tScene, vUv + vec2(px.x, 0.0)).rgb + texture2D(tScene, vUv - vec2(px.x, 0.0)).rgb
                      + texture2D(tScene, vUv + vec2(0.0, px.y)).rgb + texture2D(tScene, vUv - vec2(0.0, px.y)).rgb) * 0.25;
           vec3 hi = c - blur;
-          c += clamp(hi, vec3(-0.15), vec3(0.15)) * 0.55 * uFx;
+          c += clamp(hi, vec3(-0.15), vec3(0.15)) * 0.28 * uFx;
           c = max(c, vec3(0.0));
         }
         if (uDebugNaN > 0.5 && any(equal(floatBitsToUint(c) & 0x7f800000u, uvec3(0x7f800000u)))) { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
@@ -257,7 +257,7 @@ function createPostFX(renderer, scene, camera) {
           vec3 acc = vec3(0.0); float w = 1.0;
           for (int i = 0; i < 20; i++) {
             vec3 s = texture2D(tScene, uv).rgb;
-            acc += max(s - 2.2, 0.0) * w;
+            acc += max(s - 4.0, 0.0) * w;
             w *= 0.93; uv += dlt;
           }
           float fall = 1.0 - smoothstep(0.2, 1.4, length(uSunUV - vUv));
@@ -274,7 +274,7 @@ function createPostFX(renderer, scene, camera) {
         c = mix(c, c * vec3(1.25, 0.72, 0.68), uTint);
         // filmic contrast: pivot at mid-grey so shadows deepen and lights stay put
         c = max(vec3(0.0), mix(vec3(0.18), c, 1.0) );
-        c = 0.18 * pow(max(c / 0.18, vec3(1e-4)), vec3(1.0 + 0.12 * uFx));
+        c = 0.18 * pow(max(c / 0.18, vec3(1e-4)), vec3(1.0 + 0.05 * uFx));
         // vignette: optical falloff, not a black frame
         vec2 d = (vUv - 0.5) * vec2(1.0, 0.8);
         c *= 1.0 - uVignette * smoothstep(0.08, 0.55, dot(d, d) * 1.6);

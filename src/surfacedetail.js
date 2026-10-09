@@ -39,7 +39,7 @@ function upgradeSurfaces(scene) {
   function patch(m, mode) {
     const bumpOnly = mode !== 'full', tile = mode === 'tile';
     const metal = m.metalness > 0.4;
-    const colVar = tile ? 0.2 : bumpOnly ? 0.0 : (metal ? 0.12 : 0.26);
+    const colVar = tile ? 0.09 : bumpOnly ? 0.0 : (metal ? 0.12 : 0.26);
     const roughVar = metal ? 0.35 : 0.22;
     const bump = metal ? 0.35 : 0.6;
     m.onBeforeCompile = (sh) => {
