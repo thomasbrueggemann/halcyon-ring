@@ -244,7 +244,7 @@ function createPostFX(renderer, scene, camera) {
           float dp = texture2D(tDepth, vUv).r;
           vec4 vp = uInvProj * vec4(vUv * 2.0 - 1.0, dp * 2.0 - 1.0, 1.0);
           vec3 vpos = vp.xyz / vp.w;
-          float dist = dp >= 0.99999 ? 4000.0 : length(vpos);
+          float dist = dp >= 0.99999 ? 1800.0 : length(vpos);
           vec3 rd = normalize(vpos);
           float cs = max(dot(rd, uSunView), 0.0);
           float amt = (1.0 - exp(-dist * 0.00045)) * (0.25 * cs * cs + pow(cs, 8.0) * 1.6);
