@@ -200,7 +200,7 @@ function createPostFX(renderer, scene, camera) {
       uBloom: { value: 0.14 }, uVignette: { value: 0.32 }, uTime: { value: 0 },
       uSat: { value: 1.06 }, uTint: { value: 0 },
       tDepth: { value: hdr.depthTexture }, uInvProj: { value: new THREE.Matrix4() }, uSunUV: { value: new THREE.Vector2(0.5, 0.5) },
-      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.35 }, uScatter: { value: 0.5 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
+      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.35 }, uScatter: { value: 1.0 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
     },
     vertexShader: VERT,
     fragmentShader: /* glsl */`
@@ -211,6 +211,20 @@ function createPostFX(renderer, scene, camera) {
       float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
       void main() {
         vec3 c = texture2D(tScene, vUv).rgb;
+        {
+          // lens: slight lateral chromatic aberration growing to the edges, then
+          // a clamped unsharp mask to bring back the detail MSAA + bloom soften
+          vec2 px = 1.0 / vec2(textureSize(tScene, 0));
+          vec2 off = (vUv - 0.5) * 2.0;
+          vec2 ca = off * dot(off, off) * 1.4 * px;
+          c.r = texture2D(tScene, vUv + ca).r;
+          c.b = texture2D(tScene, vUv - ca).b;
+          vec3 blur = (texture2D(tScene, vUv + vec2(px.x, 0.0)).rgb + texture2D(tScene, vUv - vec2(px.x, 0.0)).rgb
+                     + texture2D(tScene, vUv + vec2(0.0, px.y)).rgb + texture2D(tScene, vUv - vec2(0.0, px.y)).rgb) * 0.25;
+          vec3 hi = c - blur;
+          c += clamp(hi, vec3(-0.15), vec3(0.15)) * 0.55;
+          c = max(c, vec3(0.0));
+        }
         if (uDebugNaN > 0.5 && any(equal(floatBitsToUint(c) & 0x7f800000u, uvec3(0x7f800000u)))) { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
         if (any(equal(floatBitsToUint(c) & 0x7f800000u, uvec3(0x7f800000u)))) {
           // patch a bad texel from its neighbours rather than leave a hole
@@ -258,6 +272,9 @@ function createPostFX(renderer, scene, camera) {
         c *= mix(vec3(0.975, 0.995, 1.035), vec3(1.035, 1.0, 0.965), hl);
         // alarm tint (gravity failure) — driven from main.js
         c = mix(c, c * vec3(1.25, 0.72, 0.68), uTint);
+        // filmic contrast: pivot at mid-grey so shadows deepen and lights stay put
+        c = max(vec3(0.0), mix(vec3(0.18), c, 1.0) );
+        c = 0.18 * pow(max(c / 0.18, vec3(1e-4)), vec3(1.12));
         // vignette: optical falloff, not a black frame
         vec2 d = (vUv - 0.5) * vec2(1.0, 0.8);
         c *= 1.0 - uVignette * smoothstep(0.08, 0.55, dot(d, d) * 1.6);

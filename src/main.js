@@ -58,7 +58,7 @@ const postfx = createPostFX(renderer, scene, camera);
 }
 
 // ── lights ──
-const sun = new THREE.DirectionalLight(0xfff2e0, 2.5);
+const sun = new THREE.DirectionalLight(0xfff0d8, 3.1);
 sun.castShadow = true;
 const SHADOW_N = renderer.capabilities.maxTextureSize >= 8192 ? 4096 : 2048;
 const SHADOW_HALF = 110;
@@ -75,7 +75,7 @@ scene.add(sun, sun.target);
 // hemisphere term earns its keep again now the mountain rims exist: whichever
 // way the sun offset leans, one of the two inner faces is always backlit, and
 // without a sky fill that whole side of the valley goes to a black cutout.
-const hemi = new THREE.HemisphereLight(0xbfd9ee, 0x51663d, 0.55);
+const hemi = new THREE.HemisphereLight(0xbfd9ee, 0x51663d, 0.42);
 scene.add(hemi);
 scene.add(new THREE.AmbientLight(0xffffff, 0.10));
 
