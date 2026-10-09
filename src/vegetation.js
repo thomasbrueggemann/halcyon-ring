@@ -864,12 +864,23 @@ function buildVegetation(scene, textures, colliders, rng) {
   // real canopies are darker and far less saturated than a paint-box green;
   // the spread in hue (olive → blue-green) is what makes a wood read as mixed
   const leafTint = () => _c.setHSL(0.2 + rng() * 0.12, 0.26 + rng() * 0.2, 0.3 + rng() * 0.13).clone();
-  addInstanced(oakGeo, [barkMat, leafMat, cardMat], oaks, { tintFn: leafTint });
-  addInstanced(poplarGeo, [barkMat, leafMat, cardMat], poplars, { tintFn: leafTint });
-  addInstanced(pineGeo, [barkMat, pineMat], pines);
+  // Individuality for trees: one geometry per species means every tree is the
+  // same shape and, for pines, the same green. A private PRNG (not `rng`) gives
+  // each a different proportion — taller/narrower, squat/broad — and each pine
+  // its own shade, without moving a single placement the shared stream feeds.
+  const treeRng = mulberry32(0x7ee5);
+  const shapeJitter = (list) => list.map(t => {
+    const s = typeof t.scale === 'number' ? t.scale : 1;
+    const w = 0.86 + treeRng() * 0.3, h = 0.88 + treeRng() * 0.28;
+    return { ...t, scale: new THREE.Vector3(s * w, s * h, s * (w * (0.94 + treeRng() * 0.12))) };
+  });
+  const pineTint = () => _c.setRGB(0.78 + treeRng() * 0.22, 0.82 + treeRng() * 0.2, 0.74 + treeRng() * 0.2).clone();
+  addInstanced(oakGeo, [barkMat, leafMat, cardMat], shapeJitter(oaks), { tintFn: leafTint });
+  addInstanced(poplarGeo, [barkMat, leafMat, cardMat], shapeJitter(poplars), { tintFn: leafTint });
+  addInstanced(pineGeo, [barkMat, pineMat], shapeJitter(pines), { tintFn: pineTint });
 
-  addInstanced(oakLoGeo, [barkMat, leafMat], oaksLo, { tintFn: leafTint });
-  addInstanced(pineLoGeo, [barkMat, pineMat], pinesLo);
+  addInstanced(oakLoGeo, [barkMat, leafMat], shapeJitter(oaksLo), { tintFn: leafTint });
+  addInstanced(pineLoGeo, [barkMat, pineMat], shapeJitter(pinesLo), { tintFn: pineTint });
 
   const bushGeo = new THREE.SphereGeometry(0.8, 9, 7);
   bushGeo.scale(1, 0.75, 1);
