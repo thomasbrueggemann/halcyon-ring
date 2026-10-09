@@ -79,6 +79,9 @@ function buildVegetation(scene, textures, colliders, rng) {
             float fn = sin(vFolP.x * 0.9 + vFolSeed * 6.0) * sin(vFolP.y * 0.7 - vFolP.z * 0.8 + vFolSeed * 3.0) * sin(vFolP.z * 1.1 + vFolP.x * 0.5 + vFolSeed * 9.0);
             diffuseColor.rgb *= mix(vec3(1.0), vec3(1.0 + 0.16 * fn, 1.0 + 0.10 * fn, 1.0 - 0.14 * fn) * (1.0 + 0.10 * fn), uFolVar);
           }
+          // a card inches from the lens is magnified until its needles smear into
+          // a streak across the frame: dissolve foliage closer than ~1 m instead
+          diffuseColor.a *= smoothstep(0.45, 1.5, length(vViewPosition));
           diffuseColor.a = clamp((diffuseColor.a - alphaTest) / max(fwidth(diffuseColor.a), 1e-4) + 0.5, 0.0, 1.0);
           if (diffuseColor.a < 0.01) discard;`)
         .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
@@ -96,7 +99,7 @@ function buildVegetation(scene, textures, colliders, rng) {
           reflectedLight.indirectDiffuse *= vFolAO;
           reflectedLight.directDiffuse *= mix(0.75, 1.0, vFolAO);`);
     };
-    m.customProgramCacheKey = () => 'foliage-v2-' + sway + (edgeFade ? '-e' : '');
+    m.customProgramCacheKey = () => 'foliage-v3-' + sway + (edgeFade ? '-e' : '');
     return m;
   }
   const leafMat = foliageMat(textures.leaf, textures.leafN, [6, 6]);
