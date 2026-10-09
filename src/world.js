@@ -323,9 +323,16 @@ function makeWaterMaterial(textures) {
         vec3 n1 = texture2D(wN1, r1).xyz * 2.0 - 1.0;
         vec3 n2 = texture2D(wN2, r2).xyz * 2.0 - 1.0;
         vec3 nl = normalize(vec3(n1.xy * 0.34 + n2.xy * 0.22, 1.0));
-        normal = normalize(nl.x * vTanW + nl.y * vBitW + nl.z * vNrmW);`);
+        normal = normalize(nl.x * vTanW + nl.y * vBitW + nl.z * vNrmW);
+        // Fresnel, applied to the SKY reflection only: looking down into water you
+        // see the bed (and a faint mirror); only grazing angles reflect the whole
+        // sky. The painted environment is pale, so at full strength from above it
+        // turned the river into a grey-white slab.
+        float wFr = pow(1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0), 3.0);`)
+      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+        reflectedLight.indirectSpecular *= mix(0.28, 1.0, wFr);`);
   };
-  mat.customProgramCacheKey = () => 'water-v1';
+  mat.customProgramCacheKey = () => 'water-v3';
   return mat;
 }
 
