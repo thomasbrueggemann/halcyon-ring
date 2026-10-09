@@ -1301,7 +1301,28 @@ function buildCity(scene, textures, colliders, rng) {
     const legB = legA.clone();
     legB.translate(0, 0, -1.44);
     const benchGeo = mergeGeometries([seat, back, legA, legB]);
-    const benchMat = new THREE.MeshStandardMaterial({ color: 0xa58860, roughness: 0.9 });
+    // weathered slats: long grain streaks with a few knots, drawn once. Box UVs
+    // put v along the 1.75 m length, so the grain runs the way real planks do.
+    const grain = (() => {
+      const c = document.createElement('canvas'); c.width = 128; c.height = 256;
+      const g = c.getContext('2d');
+      g.fillStyle = '#9b7e56'; g.fillRect(0, 0, 128, 256);
+      const r = mulberry32(7717);
+      for (let i = 0; i < 160; i++) {
+        const x = r() * 128, w = 0.6 + r() * 2.4, l = 0.5 + r() * 0.5;
+        g.fillStyle = r() < 0.5 ? `rgba(70,46,24,${0.06 + r() * 0.16})` : `rgba(210,176,128,${0.05 + r() * 0.12})`;
+        g.fillRect(x, r() * 256 * (1 - l), w, 256 * l);
+      }
+      for (let i = 0; i < 4; i++) {
+        const x = 16 + r() * 96, y = 20 + r() * 216;
+        g.strokeStyle = 'rgba(60,38,20,0.35)'; g.lineWidth = 1;
+        for (let k = 1; k < 4; k++) { g.beginPath(); g.ellipse(x, y, 2 + k * 2, 5 + k * 5, 0, 0, 6.3); g.stroke(); }
+      }
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8;
+      return t;
+    })();
+    const benchMat = new THREE.MeshStandardMaterial({ map: grain, color: 0xe3d5bf, roughness: 0.88 });
     city.add(instancedFrom(benchGeo, benchMat, benchPlacements));
   }
 
