@@ -200,13 +200,13 @@ function createPostFX(renderer, scene, camera) {
       uBloom: { value: 0.14 }, uVignette: { value: 0.32 }, uTime: { value: 0 },
       uSat: { value: 1.06 }, uTint: { value: 0 },
       tDepth: { value: hdr.depthTexture }, uInvProj: { value: new THREE.Matrix4() }, uSunUV: { value: new THREE.Vector2(0.5, 0.5) },
-      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.35 }, uScatter: { value: 1.0 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
+      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.35 }, uScatter: { value: 1.0 }, uFx: { value: 1 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
     },
     vertexShader: VERT,
     fragmentShader: /* glsl */`
       uniform sampler2D tScene, tBloom, tAO, tDepth;
       uniform mat4 uInvProj; uniform vec2 uSunUV; uniform vec3 uSunView; uniform float uSunVis, uRays, uScatter;
-      uniform float uDebugNaN, uDebugAO, uAO, uBloom, uVignette, uTime, uSat, uTint;
+      uniform float uFx; uniform float uDebugNaN, uDebugAO, uAO, uBloom, uVignette, uTime, uSat, uTint;
       varying vec2 vUv;
       float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
       void main() {
@@ -216,13 +216,13 @@ function createPostFX(renderer, scene, camera) {
           // a clamped unsharp mask to bring back the detail MSAA + bloom soften
           vec2 px = 1.0 / vec2(textureSize(tScene, 0));
           vec2 off = (vUv - 0.5) * 2.0;
-          vec2 ca = off * dot(off, off) * 1.4 * px;
+          vec2 ca = off * dot(off, off) * 0.7 * px * uFx;
           c.r = texture2D(tScene, vUv + ca).r;
           c.b = texture2D(tScene, vUv - ca).b;
           vec3 blur = (texture2D(tScene, vUv + vec2(px.x, 0.0)).rgb + texture2D(tScene, vUv - vec2(px.x, 0.0)).rgb
                      + texture2D(tScene, vUv + vec2(0.0, px.y)).rgb + texture2D(tScene, vUv - vec2(0.0, px.y)).rgb) * 0.25;
           vec3 hi = c - blur;
-          c += clamp(hi, vec3(-0.15), vec3(0.15)) * 0.55;
+          c += clamp(hi, vec3(-0.15), vec3(0.15)) * 0.55 * uFx;
           c = max(c, vec3(0.0));
         }
         if (uDebugNaN > 0.5 && any(equal(floatBitsToUint(c) & 0x7f800000u, uvec3(0x7f800000u)))) { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
@@ -248,7 +248,7 @@ function createPostFX(renderer, scene, camera) {
           vec3 rd = normalize(vpos);
           float cs = max(dot(rd, uSunView), 0.0);
           float amt = (1.0 - exp(-dist * 0.00045)) * (0.25 * cs * cs + pow(cs, 8.0) * 1.6);
-          c += vec3(1.0, 0.86, 0.62) * amt * uScatter * 0.25;
+          c += vec3(1.0, 0.86, 0.62) * amt * uScatter * uFx * 0.25;
         }
         // crepuscular rays: radial march toward the sun through bright texels
         if (uSunVis > 0.001 && uRays > 0.0) {
@@ -274,7 +274,7 @@ function createPostFX(renderer, scene, camera) {
         c = mix(c, c * vec3(1.25, 0.72, 0.68), uTint);
         // filmic contrast: pivot at mid-grey so shadows deepen and lights stay put
         c = max(vec3(0.0), mix(vec3(0.18), c, 1.0) );
-        c = 0.18 * pow(max(c / 0.18, vec3(1e-4)), vec3(1.12));
+        c = 0.18 * pow(max(c / 0.18, vec3(1e-4)), vec3(1.0 + 0.12 * uFx));
         // vignette: optical falloff, not a black frame
         vec2 d = (vUv - 0.5) * vec2(1.0, 0.8);
         c *= 1.0 - uVignette * smoothstep(0.08, 0.55, dot(d, d) * 1.6);
