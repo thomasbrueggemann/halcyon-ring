@@ -32,11 +32,14 @@ function buildVegetation(scene, textures, colliders, rng) {
     });
     m.onBeforeCompile = (sh) => {
       sh.uniforms.uFolTime = { value: 0 };
+      sh.uniforms.uFolVar = { value: 1 };
       foliageShaders.push(sh);
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', `#include <common>
           uniform float uFolTime;
-          varying float vFolAO;`)
+          varying float vFolAO;
+          varying vec3 vFolP;
+          varying float vFolSeed;`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>
           #ifdef USE_INSTANCING
             vec3 fip = instanceMatrix[3].xyz;
@@ -44,6 +47,7 @@ function buildVegetation(scene, textures, colliders, rng) {
             vec3 fip = vec3(0.0);
           #endif
           float fph = dot(fip, vec3(0.071, 0.113, 0.093));
+          vFolP = position; vFolSeed = fph;
           float fk = max(0.0, position.y - 1.6) * ${(0.022 * sway).toFixed(4)};
           transformed.x += (sin(uFolTime * 0.9 + fph) * 0.7 + sin(uFolTime * 2.1 + fph * 1.7) * 0.3) * fk;
           transformed.z += (cos(uFolTime * 0.7 + fph * 1.3) * 0.6) * fk;
@@ -51,7 +55,10 @@ function buildVegetation(scene, textures, colliders, rng) {
           vFolAO = mix(0.5, 1.0, smoothstep(-0.7, 0.6, objectNormal.y));`);
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>
-          varying float vFolAO;`)
+          uniform float uFolVar;
+          varying float vFolAO;
+          varying vec3 vFolP;
+          varying float vFolSeed;`)
         .replace('#include <alphatest_fragment>', `
           // mip-aware alpha + sharpen, fed to alpha-to-coverage
           #ifdef USE_MAP
@@ -65,6 +72,13 @@ function buildVegetation(scene, textures, colliders, rng) {
             vec3 fgn = normalize(cross(dFdx(vViewPosition), dFdy(vViewPosition)));
             diffuseColor.a *= smoothstep(0.08, 0.4, abs(dot(fgn, normalize(vViewPosition))));
           }` : ''}
+          {
+            // low-frequency patches of lighter / darker / warmer needles and
+            // leaves across each crown, different per tree: stops the one
+            // texture reading as the same stamp repeated over every bough
+            float fn = sin(vFolP.x * 0.9 + vFolSeed * 6.0) * sin(vFolP.y * 0.7 - vFolP.z * 0.8 + vFolSeed * 3.0) * sin(vFolP.z * 1.1 + vFolP.x * 0.5 + vFolSeed * 9.0);
+            diffuseColor.rgb *= mix(vec3(1.0), vec3(1.0 + 0.16 * fn, 1.0 + 0.10 * fn, 1.0 - 0.14 * fn) * (1.0 + 0.10 * fn), uFolVar);
+          }
           diffuseColor.a = clamp((diffuseColor.a - alphaTest) / max(fwidth(diffuseColor.a), 1e-4) + 0.5, 0.0, 1.0);
           if (diffuseColor.a < 0.01) discard;`)
         .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
@@ -82,7 +96,7 @@ function buildVegetation(scene, textures, colliders, rng) {
           reflectedLight.indirectDiffuse *= vFolAO;
           reflectedLight.directDiffuse *= mix(0.75, 1.0, vFolAO);`);
     };
-    m.customProgramCacheKey = () => 'foliage-v1-' + sway + (edgeFade ? '-e' : '');
+    m.customProgramCacheKey = () => 'foliage-v2-' + sway + (edgeFade ? '-e' : '');
     return m;
   }
   const leafMat = foliageMat(textures.leaf, textures.leafN, [6, 6]);
@@ -985,6 +999,6 @@ function buildVegetation(scene, textures, colliders, rng) {
 
   return {
     group: veg,
-    update(t) { for (const sh of foliageShaders) sh.uniforms.uFolTime.value = t; },
+    update(t) { for (const sh of foliageShaders) { sh.uniforms.uFolTime.value = t; sh.uniforms.uFolVar.value = window.__folVar === undefined ? 1 : window.__folVar; } },
   };
 }
