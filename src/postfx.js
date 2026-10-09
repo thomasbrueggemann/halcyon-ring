@@ -198,11 +198,14 @@ function createPostFX(renderer, scene, camera) {
     uniforms: {
       tScene: { value: hdr.texture }, tBloom: { value: mips[0].texture }, tAO: { value: aoRT.texture }, uAO: { value: 0.75 },
       uBloom: { value: 0.14 }, uVignette: { value: 0.32 }, uTime: { value: 0 },
-      uSat: { value: 1.06 }, uTint: { value: 0 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
+      uSat: { value: 1.06 }, uTint: { value: 0 },
+      tDepth: { value: hdr.depthTexture }, uInvProj: { value: new THREE.Matrix4() }, uSunUV: { value: new THREE.Vector2(0.5, 0.5) },
+      uSunView: { value: new THREE.Vector3(0, 1, 0) }, uSunVis: { value: 0 }, uRays: { value: 0.35 }, uScatter: { value: 0.5 }, uDebugAO: { value: 0 }, uDebugNaN: { value: 0 },
     },
     vertexShader: VERT,
     fragmentShader: /* glsl */`
-      uniform sampler2D tScene, tBloom, tAO;
+      uniform sampler2D tScene, tBloom, tAO, tDepth;
+      uniform mat4 uInvProj; uniform vec2 uSunUV; uniform vec3 uSunView; uniform float uSunVis, uRays, uScatter;
       uniform float uDebugNaN, uDebugAO, uAO, uBloom, uVignette, uTime, uSat, uTint;
       varying vec2 vUv;
       float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -222,6 +225,30 @@ function createPostFX(renderer, scene, camera) {
         }
         c *= mix(1.0, texture2D(tAO, vUv).r, uAO);
         if (uDebugAO > 0.5) c = vec3(texture2D(tAO, vUv).r * 0.8);
+        // in-scattered sunlight: haze thickens with distance and glows toward the sun
+        {
+          float dp = texture2D(tDepth, vUv).r;
+          vec4 vp = uInvProj * vec4(vUv * 2.0 - 1.0, dp * 2.0 - 1.0, 1.0);
+          vec3 vpos = vp.xyz / vp.w;
+          float dist = dp >= 0.99999 ? 4000.0 : length(vpos);
+          vec3 rd = normalize(vpos);
+          float cs = max(dot(rd, uSunView), 0.0);
+          float amt = (1.0 - exp(-dist * 0.00045)) * (0.25 * cs * cs + pow(cs, 8.0) * 1.6);
+          c += vec3(1.0, 0.86, 0.62) * amt * uScatter * 0.25;
+        }
+        // crepuscular rays: radial march toward the sun through bright texels
+        if (uSunVis > 0.001 && uRays > 0.0) {
+          vec2 dlt = (uSunUV - vUv) / 20.0;
+          vec2 uv = vUv + dlt * fract(hash12(gl_FragCoord.xy + 7.0));
+          vec3 acc = vec3(0.0); float w = 1.0;
+          for (int i = 0; i < 20; i++) {
+            vec3 s = texture2D(tScene, uv).rgb;
+            acc += max(s - 2.2, 0.0) * w;
+            w *= 0.93; uv += dlt;
+          }
+          float fall = 1.0 - smoothstep(0.2, 1.4, length(uSunUV - vUv));
+          c += min(acc, vec3(30.0)) / 20.0 * vec3(1.0, 0.92, 0.78) * uRays * uSunVis * fall;
+        }
         vec3 b = texture2D(tBloom, vUv).rgb;
         c += b * (uBloom / 6.0);            // mips[0] holds the sum of 6 levels
         // grade in linear light: gentle saturation, cool shadows / warm highlights
@@ -266,6 +293,8 @@ function createPostFX(renderer, scene, camera) {
   setSize(size.x, size.y);
 
   const state = { enabled: true, ao: true };
+  let sunDirWorld = null;
+  const _sv = new THREE.Vector3(), _sp = new THREE.Vector3();
   function render(t) {
     if (!state.enabled) {
       renderer.setRenderTarget(null);
@@ -309,9 +338,20 @@ function createPostFX(renderer, scene, camera) {
     }
     renderer.autoClear = true;
     compMat.uniforms.uTime.value = t;
+    {
+      const u = compMat.uniforms;
+      u.uInvProj.value.copy(camera.projectionMatrixInverse);
+      if (sunDirWorld) {
+        _sv.copy(sunDirWorld).transformDirection(camera.matrixWorldInverse);
+        u.uSunView.value.copy(_sv);
+        _sp.copy(camera.position).addScaledVector(sunDirWorld, 1000).project(camera);
+        u.uSunUV.value.set(_sp.x * 0.5 + 0.5, _sp.y * 0.5 + 0.5);
+        u.uSunVis.value = _sv.z < 0 ? 1 : 0;
+      }
+    }
     pass(compMat, null);
     renderer.autoClear = prevAuto;
   }
 
-  return { render, setSize, state, uniforms: compMat.uniforms, target: hdr };
+  return { render, setSize, state, setSun: (d) => { sunDirWorld = d; }, uniforms: compMat.uniforms, target: hdr };
 }

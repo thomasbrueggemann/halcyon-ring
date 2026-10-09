@@ -297,6 +297,7 @@ const clock = new THREE.Clock();
 const _mainUp = new THREE.Vector3();
 const _mainTan = new THREE.Vector3();
 const _sunDir = new THREE.Vector3(), _sunR = new THREE.Vector3(), _sunU = new THREE.Vector3();
+postfx.setSun(_sunDir);
 const SUN_STEP = 0.8 / RF;
 
 function animate() {
