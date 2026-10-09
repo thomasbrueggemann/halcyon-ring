@@ -1114,15 +1114,31 @@ function makeTextures() {
         const base = 190 * p.g;
         const cs = `rgb(${Math.round(base * 0.45)},${Math.round(base)},${Math.round(base * 0.55)})`;
         const hv = Math.round(40 + 200 * layer);
-        for (const [ctx, style] of [[cc, cs], [hc, `rgb(${hv},${hv},${hv})`]]) {
-          ctx.strokeStyle = style; ctx.lineCap = 'round';
-          ctx.lineWidth = 1.6;
+        // dense, fine needles: many short strokes per side, each with its own
+        // length, angle and shade, fanning forward from a thin woody stem. The old
+        // 10–18 coarse spikes read as a fern frond; real spruce/pine sprays are
+        // closer to a bottle-brush, which also fills the card so it cuts out less.
+        const rr = (a) => { a = (a * 9301 + 49297) % 233280; return a; };
+        let seed = Math.floor(p.L * 977 + p.n * 131 + p.g * 4001);
+        const rnd = () => { seed = rr(seed); return seed / 233280; };
+        for (const [ctx, isColour] of [[cc, true], [hc, false]]) {
+          ctx.lineCap = 'round';
+          ctx.strokeStyle = isColour ? `rgb(${Math.round(base * 0.38)},${Math.round(base * 0.55)},${Math.round(base * 0.32)})` : `rgb(${hv},${hv},${hv})`;
+          ctx.lineWidth = 1.5;
           ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(p.L * 0.5, p.bend * p.L, p.L, 0); ctx.stroke();
-          ctx.lineWidth = 1.3;
-          for (let k = 1; k <= p.n; k++) {
-            const t = k / (p.n + 1), x = p.L * t, len = 7 * (1 - t * 0.5);
+          const pairs = p.n * 3;
+          for (let k = 1; k <= pairs; k++) {
+            const t = k / (pairs + 1), x = p.L * t;
+            const stem = p.bend * p.L * 2 * t * (1 - t);        // follow the stem's curve
+            const len = (6.5 - 3.2 * t) * (0.7 + rnd() * 0.6);
             for (const sgn of [-1, 1]) {
-              ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + len * 0.55, sgn * len); ctx.stroke();
+              const ang = (0.55 + rnd() * 0.5) * sgn;           // fan forward
+              const shade = 0.75 + rnd() * 0.5;
+              ctx.lineWidth = 0.7 + rnd() * 0.5;
+              if (isColour) ctx.strokeStyle = `rgb(${Math.round(base * 0.42 * shade)},${Math.round(base * shade)},${Math.round(base * 0.5 * shade)})`;
+              ctx.beginPath(); ctx.moveTo(x, stem);
+              ctx.lineTo(x + Math.cos(ang) * len * 0.8, stem + Math.sin(ang) * len);
+              ctx.stroke();
             }
           }
         }
