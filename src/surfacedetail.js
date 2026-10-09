@@ -34,9 +34,12 @@ function upgradeSurfaces(scene) {
   const defaultOBC = THREE.Material.prototype.onBeforeCompile;
   let upgraded = 0;
 
-  function patch(m, bumpOnly) {
+  // mode: 'full' (flat colour), 'bump' (has albedo map), 'tile' (has albedo AND
+  // normal map — only large-scale variation, to break up the texture repeat)
+  function patch(m, mode) {
+    const bumpOnly = mode !== 'full', tile = mode === 'tile';
     const metal = m.metalness > 0.4;
-    const colVar = bumpOnly ? 0.0 : (metal ? 0.12 : 0.26);
+    const colVar = tile ? 0.2 : bumpOnly ? 0.0 : (metal ? 0.12 : 0.26);
     const roughVar = metal ? 0.35 : 0.22;
     const bump = metal ? 0.35 : 0.6;
     m.onBeforeCompile = (sh) => {
@@ -72,10 +75,11 @@ function upgradeSurfaces(scene) {
           vec2 sdA = sdTri(vSdPos, sdW, 0.33);      // 3 m blotches
           vec2 sdB = sdTri(vSdPos, sdW, 2.4);       // 0.4 m grain
           float sdGrime = sdA.r * 0.65 + sdB.r * 0.35;
+          ${tile ? `sdGrime = sdA.r * 0.45 + sdTri(vSdPos, sdW, 0.045).r * 0.55;` : ''}
           diffuseColor.rgb *= 1.0 + ${colVar.toFixed(3)} * (sdGrime - 0.5) * 2.0;`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
           roughnessFactor = clamp(roughnessFactor + ${roughVar.toFixed(3)} * (sdA.r * 0.5 + sdB.g * 0.5 - 0.5) * 2.0, 0.04, 1.0);`)
-        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        .replace('#include <normal_fragment_maps>', tile ? '#include <normal_fragment_maps>' : `#include <normal_fragment_maps>
           {
             // bump from the fine octave (Mikkelsen's surface-gradient form)
             float sdH = sdB.g * 0.6 + sdTri(vSdPos, sdW, 9.0).r * 0.4;
@@ -88,7 +92,7 @@ function upgradeSurfaces(scene) {
             normal = normalize(abs(sdDet) * normal - sdGrad);
           }`);
     };
-    m.customProgramCacheKey = () => 'surf-detail-' + (bumpOnly ? 'b' : 'c') + (metal ? 'm' : 'd');
+    m.customProgramCacheKey = () => 'surf-detail-' + mode[0] + (metal ? 'm' : 'd');
     m.needsUpdate = true;
     upgraded++;
   }
@@ -105,8 +109,8 @@ function upgradeSurfaces(scene) {
       if (m.onBeforeCompile !== defaultOBC) continue;       // already custom
       if (m.transparent || m.opacity < 1 || m.alphaTest > 0) continue;
       if (m.emissive && (m.emissive.r + m.emissive.g + m.emissive.b) > 0.3 && !m.emissiveMap) continue;
-      if (m.normalMap) continue;                             // already detailed
-      patch(m, !!m.map);
+      if (m.normalMap) { if (m.map) patch(m, 'tile'); continue; }   // already detailed: just break the repeat
+      patch(m, m.map ? 'bump' : 'full');
     }
   });
   return { upgraded };
